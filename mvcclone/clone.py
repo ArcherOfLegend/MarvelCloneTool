@@ -1,29 +1,3 @@
-"""
-The port workflow from Yoshi's guide, as a job you can preview before running.
-
-Source layout in the game install:
-
-    nativePCx64/chr/archive/0033_00.arc  ... _07.arc   costumes
-    nativePCx64/chr/archive/0033_cmn.arc                shared assets
-    nativePCx64/chr/archive/0033_param.arc              shot files, shotlist
-    sound/se/chr/archive/0033_01.arc                    English voice bank
-    nativePCx64/ui/.../mnchs_en.arc                     select screen art
-
-Output, named after the clone instead of the numeric ID:
-
-    PwrSuit_00.arc ... PwrSuit_cmn.arc, PwrSuit_param.arc   -> chr/archive/
-    PwrSuit.arc                                             -> sound/se/chr/archive/
-    n_PwrSuit_BM_HQ_NOMIP_typeB_other.tex                   -> ui/chs/chs_b1p/chs_as_n/
-    b_PwrSuit99_BM_HQ_NOMIP.tex                             -> ui/chs/chs_b1p/chs_body/
-    a characters.ini block
-
-The search term differs per archive, and that is deliberate. cmn and the costume
-arcs use a leading backslash only, so material and effect references get caught
-along with folder references. param uses backslashes on both sides so only whole
-folder references in the shot files and shotlist are touched. Dropping the
-leading backslash anywhere would start hitting class names.
-"""
-
 from __future__ import annotations
 
 import re
@@ -38,7 +12,7 @@ from .rename import (
 )
 
 CHR_ARCHIVE = Path("nativePCx64/chr/archive")
-SOUND_ARCHIVE = Path("sound/se/chr/archive")
+SOUND_ARCHIVE = Path("nativePCx64/sound/se/chr/archive")
 UI_NAME_DIR = Path("nativePCx64/ui/chs/chs_b1p/chs_as_n")
 UI_BODY_DIR = Path("nativePCx64/ui/chs/chs_b1p/chs_body")
 
