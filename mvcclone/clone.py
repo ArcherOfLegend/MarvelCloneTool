@@ -12,7 +12,25 @@ from .rename import (
 )
 
 CHR_ARCHIVE = Path("nativePCx64/chr/archive")
-SOUND_ARCHIVE = Path("nativePCx64/sound/se/chr/archive")
+# Installs disagree on whether the sound tree sits at the root or under
+# nativePCx64, so the location is discovered rather than assumed, and output
+# mirrors wherever the source was actually found.
+SOUND_ARCHIVE_CANDIDATES = [
+    Path("nativePCx64/sound/se/chr/archive"),
+    Path("sound/se/chr/archive"),
+]
+SOUND_ARCHIVE = SOUND_ARCHIVE_CANDIDATES[0]
+
+
+def sound_archive_dir(game_dir: Path) -> Path:
+    """Relative path of the voice bank folder in this install."""
+    for candidate in SOUND_ARCHIVE_CANDIDATES:
+        if (Path(game_dir) / candidate).is_dir():
+            return candidate
+    for hit in Path(game_dir).rglob("se/chr/archive"):
+        if hit.is_dir():
+            return hit.relative_to(game_dir)
+    return SOUND_ARCHIVE_CANDIDATES[0]
 UI_NAME_DIR = Path("nativePCx64/ui/chs/chs_b1p/chs_as_n")
 UI_BODY_DIR = Path("nativePCx64/ui/chs/chs_b1p/chs_body")
 
@@ -108,7 +126,7 @@ def find_sources(game_dir: Path, char_id: str, sound_lang: str = "01") -> dict[s
         for f in sorted(chr_dir.glob(f"{char_id}_*.arc")):
             found[f.stem.split("_", 1)[1]] = f
 
-    snd = game_dir / SOUND_ARCHIVE / f"{char_id}_{sound_lang}.arc"
+    snd = game_dir / sound_archive_dir(game_dir) / f"{char_id}_{sound_lang}.arc"
     if snd.is_file():
         found["sound"] = snd
 
@@ -200,7 +218,7 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
 
     if suffix == "sound":
         dest_name = f"{spec.new_name}.arc"
-        dest = spec.out_dir / SOUND_ARCHIVE / dest_name
+        dest = spec.out_dir / sound_archive_dir(spec.game_dir) / dest_name
     else:
         dest = spec.out_dir / CHR_ARCHIVE / f"{spec.new_name}_{suffix}.arc"
 
@@ -281,7 +299,7 @@ def clone_sound(spec: CloneSpec, src: Path, log=print) -> ArcResult:
         e.path = renamed
         path_renames += 1
 
-    dest = spec.out_dir / SOUND_ARCHIVE / f"{spec.new_name}.arc"
+    dest = spec.out_dir / sound_archive_dir(spec.game_dir) / f"{spec.new_name}.arc"
     if refused:
         log(f"{src.name}: {len(refused)} refusals, voice bank not written")
         return ArcResult("sound", src, Path(), len(arc.entries), hits, path_renames, refused)
@@ -362,38 +380,106 @@ def find_ui_arc(game_dir: Path) -> Path | None:
     return hits[0] if hits else None
 
 
+UI_NAME_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(?=_|\d|$)"
+
+
+def rename_ui_leaf(leaf: str, base: str, new: str) -> str:
+    """
+    Rename a character name inside a UI texture's filename.
+
+    UI leaves are underscore separated and sometimes glue a number straight onto
+    the name: b_IronMan99_BM_HQ_NOMIP is the select screen silhouette,
+    f_Ryu00_BM_HQ_NOMIP is the in-game portrait for costume 00. So a trailing
+    digit counts as a delimiter here, unlike in asset paths where that would
+    start eating move names.
+    """
+    return re.sub(UI_NAME_RE_TEMPLATE.format(name=re.escape(base)), new, leaf)
+
+
+def find_ui_elements(game_dir: Path, base_name: str) -> list[tuple[str, Path | None, str]]:
+    """
+    Every UI texture belonging to a character, found rather than assumed.
+
+    The guide names two, the select screen silhouette and name plate. There are
+    more. The in-game HP bar wants a face portrait per costume under
+    ui/game/ga_hp_f, and missing it takes the game down with a fatal error the
+    moment a round starts. Rather than keep guessing template names, this scans
+    the ui tree and every ui arc for anything carrying the character's name.
+
+    Returns (relative destination dir, containing arc or None if loose, leaf).
+    """
+    game_dir = Path(game_dir)
+    found: list[tuple[str, Path | None, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    ui_root = game_dir / "nativePCx64" / "ui"
+    if ui_root.is_dir():
+        for f in ui_root.rglob("*.tex"):
+            leaf = f.stem
+            if rename_ui_leaf(leaf, base_name, "?") == leaf:
+                continue
+            rel = f.parent.relative_to(game_dir).as_posix()
+            if (rel, leaf) not in seen:
+                seen.add((rel, leaf))
+                found.append((rel, None, leaf))
+
+        for arc_file in sorted(ui_root.rglob("*.arc")):
+            try:
+                arc = read_arc(arc_file)
+            except ValueError:
+                continue
+            for e in arc.entries:
+                parts = re.split(r"[\\/]", e.path)
+                leaf = parts[-1]
+                if rename_ui_leaf(leaf, base_name, "?") == leaf:
+                    continue
+                rel = "nativePCx64/" + "/".join(parts[:-1])
+                if (rel, leaf) not in seen:
+                    seen.add((rel, leaf))
+                    found.append((rel, arc_file, leaf))
+
+    return found
+
+
 def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]:
-    """Pull the silhouette and name plate out of mnchs_en.arc and drop loose
-    .tex copies into the select screen directories under the clone's name."""
+    """Write a renamed copy of every UI texture the character owns."""
     written: list[Path] = []
     warnings: list[str] = []
 
-    ui_arc_path = find_ui_arc(spec.game_dir)
-    if ui_arc_path is None:
-        warnings.append("mnchs_en.arc not found, select screen art skipped")
+    elements = find_ui_elements(spec.game_dir, spec.base_name)
+    if not elements:
+        warnings.append(
+            "no UI textures found for this character, so the select screen and "
+            "HP bar art needs doing by hand")
         return written, warnings
 
-    ui_arc = read_arc(ui_arc_path)
-    wanted = {
-        UI_NAME_TEMPLATE.format(name=spec.base_name).lower():
-            (UI_NAME_DIR, UI_NAME_TEMPLATE.format(name=spec.new_name)),
-        UI_BODY_TEMPLATE.format(name=spec.base_name).lower():
-            (UI_BODY_DIR, UI_BODY_TEMPLATE.format(name=spec.new_name)),
-    }
-
-    for e in ui_arc.entries:
-        leaf = re.split(r"[\\/]", e.path)[-1].lower()
-        if leaf in wanted:
-            out_dir, new_leaf = wanted.pop(leaf)
-            dest = spec.out_dir / out_dir / f"{new_leaf}.tex"
+    by_arc: dict[Path, list[tuple[str, str]]] = {}
+    for rel, arc_file, leaf in elements:
+        if arc_file is None:
+            src = spec.game_dir / rel / f"{leaf}.tex"
+            dest = spec.out_dir / rel / f"{rename_ui_leaf(leaf, spec.base_name, spec.new_name)}.tex"
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(e.data)
+            shutil.copyfile(src, dest)
             written.append(dest)
-            log(f"select screen art -> {dest.name}")
+        else:
+            by_arc.setdefault(arc_file, []).append((rel, leaf))
 
-    for missing in wanted:
-        warnings.append(f"{missing} not in mnchs_en.arc, that element needs doing by hand")
+    for arc_file, wanted in by_arc.items():
+        arc = read_arc(arc_file)
+        index = {re.split(r"[\\/]", e.path)[-1]: e for e in arc.entries}
+        for rel, leaf in wanted:
+            entry = index.get(leaf)
+            if entry is None:
+                warnings.append(f"{leaf} vanished from {arc_file.name}")
+                continue
+            dest = spec.out_dir / rel / f"{rename_ui_leaf(leaf, spec.base_name, spec.new_name)}.tex"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(entry.data)
+            written.append(dest)
 
+    log(f"{len(written)} UI textures written")
+    for w in written:
+        log(f"   {w.parent.name}/{w.name}")
     return written, warnings
 
 
@@ -435,7 +521,7 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
             report.arcs.append(clone_sound(spec, src, log))
             continue
         if suffix == "sound":
-            dest = spec.out_dir / SOUND_ARCHIVE / f"{spec.new_name}.arc"
+            dest = spec.out_dir / sound_archive_dir(spec.game_dir) / f"{spec.new_name}.arc"
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dest)
             log(f"{src.name} -> {dest.name}  copied verbatim")

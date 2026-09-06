@@ -58,9 +58,15 @@ def build_install(root: Path):
                  padded(r"\IronMan\model\1p\mat", 56)),
     ]
     ui = [
-        ArcEntry(r"ui\chs\b_IronMan99_BM_HQ_NOMIP", hash_for_ext("tex"), 0, 0, 0, 0, b"SIL"),
-        ArcEntry(r"ui\chs\n_IronMan_BM_HQ_NOMIP_typeB_other", hash_for_ext("tex"),
-                 0, 0, 0, 0, b"NAME"),
+        ArcEntry(r"ui\chs\chs_b1p\chs_body\b_IronMan99_BM_HQ_NOMIP",
+                 hash_for_ext("tex"), 0, 0, 0, 0, b"SIL"),
+        ArcEntry(r"ui\chs\chs_b1p\chs_as_n\n_IronMan_BM_HQ_NOMIP_typeB_other",
+                 hash_for_ext("tex"), 0, 0, 0, 0, b"NAME"),
+        # the one the guide never mentions, whose absence is a fatal error
+        ArcEntry(r"ui\game\ga_hp_f\f_IronMan00_BM_HQ_NOMIP",
+                 hash_for_ext("tex"), 0, 0, 0, 0, b"FACE0"),
+        ArcEntry(r"ui\game\ga_hp_f\f_IronMan01_BM_HQ_NOMIP",
+                 hash_for_ext("tex"), 0, 0, 0, 0, b"FACE1"),
     ]
     sound = [ArcEntry(r"sound\se\iro\voice", hash_for_ext("sngw"), 0, 0, 0, 0, b"VOICE")]
 
@@ -129,13 +135,42 @@ def main():
 
         check(f"{name} sound arc written",
               (out_dir / "nativePCx64/sound/se/chr/archive" / f"{name}.arc").is_file())
-        check(f"{name} select screen art written",
+        check(f"{name} select screen silhouette written",
               (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_body"
                / f"b_{name}99_BM_HQ_NOMIP.tex").is_file())
+        check(f"{name} select screen name plate written",
+              (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_as_n"
+               / f"n_{name}_BM_HQ_NOMIP_typeB_other.tex").is_file())
+        for slot in ("00", "01"):
+            check(f"{name} HP bar portrait {slot} written",
+                  (out_dir / "nativePCx64/ui/game/ga_hp_f"
+                   / f"f_{name}{slot}_BM_HQ_NOMIP.tex").is_file())
         check(f"{name} ini block numbered past the existing one",
               "[Character2]" in report.ini_block)
         check(f"{name} ini uses SoundID", "SoundID=iro" in report.ini_block,
               report.ini_block.replace("\n", " | "))
+
+    print("\nUI texture leaf renaming")
+    from mvcclone.clone import rename_ui_leaf, sound_archive_dir
+    ui_cases = [
+        ("b_IronMan99_BM_HQ_NOMIP", BASE, "b_NEW99_BM_HQ_NOMIP"),
+        ("n_IronMan_BM_HQ_NOMIP_typeB_other", BASE, "n_NEW_BM_HQ_NOMIP_typeB_other"),
+        ("f_Ryu00_BM_HQ_NOMIP", "Ryu", "f_NEW00_BM_HQ_NOMIP"),
+        ("f_Ryu07_BM_HQ_NOMIP", "Ryu", "f_NEW07_BM_HQ_NOMIP"),
+        ("StormSword", "Storm", "StormSword"),
+        ("MajinVergil_Tex01_BM", "Vergil", "MajinVergil_Tex01_BM"),
+        ("Ironman_tex1_BM", BASE, "Ironman_tex1_BM"),
+    ]
+    for leaf, base, want in ui_cases:
+        got = rename_ui_leaf(leaf, base, "NEW")
+        check(f"ui leaf {leaf}", got == want, got)
+
+    print("\nsound folder is discovered, not assumed")
+    for layout in ("nativePCx64/sound/se/chr/archive", "sound/se/chr/archive"):
+        probe = Path(tempfile.mkdtemp())
+        (probe / layout).mkdir(parents=True)
+        check(f"finds {layout}", sound_archive_dir(probe).as_posix() == layout,
+              sound_archive_dir(probe).as_posix())
 
     print("\nnames embedded in asset names")
     from mvcclone.rename import rename_components as rc
