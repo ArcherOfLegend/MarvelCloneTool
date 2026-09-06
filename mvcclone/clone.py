@@ -1,29 +1,3 @@
-"""
-The port workflow from Yoshi's guide, as a job you can preview before running.
-
-Source layout in the game install:
-
-    nativePCx64/chr/archive/0033_00.arc  ... _07.arc   costumes
-    nativePCx64/chr/archive/0033_cmn.arc                shared assets
-    nativePCx64/chr/archive/0033_param.arc              shot files, shotlist
-    sound/se/chr/archive/0033_01.arc                    English voice bank
-    nativePCx64/ui/.../mnchs_en.arc                     select screen art
-
-Output, named after the clone instead of the numeric ID:
-
-    PwrSuit_00.arc ... PwrSuit_cmn.arc, PwrSuit_param.arc   -> chr/archive/
-    PwrSuit.arc                                             -> sound/se/chr/archive/
-    n_PwrSuit_BM_HQ_NOMIP_typeB_other.tex                   -> ui/chs/chs_b1p/chs_as_n/
-    b_PwrSuit99_BM_HQ_NOMIP.tex                             -> ui/chs/chs_b1p/chs_body/
-    a characters.ini block
-
-The search term differs per archive, and that is deliberate. cmn and the costume
-arcs use a leading backslash only, so material and effect references get caught
-along with folder references. param uses backslashes on both sides so only whole
-folder references in the shot files and shotlist are touched. Dropping the
-leading backslash anywhere would start hitting class names.
-"""
-
 from __future__ import annotations
 
 import re
@@ -46,6 +20,20 @@ SOUND_ARCHIVE_CANDIDATES = [
     Path("sound/se/chr/archive"),
 ]
 SOUND_ARCHIVE = SOUND_ARCHIVE_CANDIDATES[0]
+
+
+SOUND_EVENT_CANDIDATES = [
+    Path("nativePCx64/sound/event"),
+    Path("sound/event"),
+]
+
+
+def sound_event_dir(game_dir: Path) -> Path:
+    """Relative path of the streamed event audio folder in this install."""
+    for candidate in SOUND_EVENT_CANDIDATES:
+        if (Path(game_dir) / candidate).is_dir():
+            return candidate
+    return SOUND_EVENT_CANDIDATES[0]
 
 
 def sound_archive_dir(game_dir: Path) -> Path:
@@ -401,6 +389,50 @@ def embedded_name_report(spec: CloneSpec) -> list[str]:
     return sorted(set(out))
 
 
+def clone_sound_events(spec: CloneSpec, base_sid: str, new_sid: str, log=print
+                       ) -> tuple[list[Path], list[str]]:
+    """
+    Copy the streamed event audio the voice bank points at.
+
+    The bank's stqr references paths like sound\\event\\iro\\source\\iro_038e, and
+    those files are not inside any arc. They sit loose on disk. Renaming the
+    references without copying the files leaves the clone pointing at audio that
+    does not exist under its new sound ID, so this mirrors the tree.
+
+    Only runs when the voice bank is being cloned. A clone that shares the base
+    character's SoundID also shares its event audio and needs none of this.
+    """
+    written: list[Path] = []
+    warnings: list[str] = []
+
+    if base_sid == new_sid:
+        return written, warnings
+
+    event_root = sound_event_dir(spec.game_dir)
+    src_dir = spec.game_dir / event_root / base_sid
+    if not src_dir.is_dir():
+        warnings.append(
+            f"no event audio at {src_dir}, so cinematic and stream sounds will be silent")
+        return written, warnings
+
+    for src in sorted(src_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(src_dir)
+        # Exactly the rule the content pass uses, a bare "<sid>_" swap. It has
+        # to match, because that pass rewrites 2iro_018ce to 2pws_018ce inside
+        # the stqr, and a file still called 2iro_018ce would be a dangling
+        # reference. Same rule both sides or the clone loses audio.
+        leaf = src.name.replace(f"{base_sid}_", f"{new_sid}_")
+        dest = spec.out_dir / event_root / new_sid / rel.parent / leaf
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+        written.append(dest)
+
+    log(f"event audio -> {len(written)} files copied from {base_sid} to {new_sid}")
+    return written, warnings
+
+
 def find_ui_arc(game_dir: Path) -> Path | None:
     hits = list(Path(game_dir).rglob("mnchs_en.arc"))
     return hits[0] if hits else None
@@ -583,7 +615,14 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
         if suffix not in wanted:
             continue
         if suffix == "sound" and spec.rename_sound_contents:
-            report.arcs.append(clone_sound(spec, src, log))
+            result = clone_sound(spec, src, log)
+            report.arcs.append(result)
+            if not result.refused:
+                base_sid = spec.base_sound_id or detect_sound_id(read_arc(src)) or ""
+                new_sid = spec.new_sound_id or base_sid
+                files, warns = clone_sound_events(spec, base_sid, new_sid, log)
+                report.files.extend(files)
+                report.warnings.extend(warns)
             continue
         if suffix == "sound":
             dest = spec.out_dir / sound_archive_dir(spec.game_dir) / f"{spec.new_name}.arc"

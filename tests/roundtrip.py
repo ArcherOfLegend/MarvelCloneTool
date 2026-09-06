@@ -179,6 +179,27 @@ def main():
         got = rename_ui_leaf(leaf, base, "NEW")
         check(f"ui leaf {leaf}", got == want, got)
 
+    print("\nevent audio files match the references the rewrite produces")
+    from mvcclone.clone import clone_sound_events
+
+    ev_game = Path(tempfile.mkdtemp()) / "g"
+    ev_dir = ev_game / "nativePCx64/sound/event/iro/source"
+    ev_dir.mkdir(parents=True)
+    stream_names = ("iro_038e", "iro_039e_pu", "2iro_018ce", "2iro_036be")
+    for stream in stream_names:
+        (ev_dir / f"{stream}.sngw").write_bytes(b"AUDIO")
+
+    ev_out = Path(tempfile.mkdtemp())
+    ev_spec = CloneSpec(ev_game, ev_out, "0033", BASE, "PwrSuit", ["00"])
+    copied, _ = clone_sound_events(ev_spec, "iro", "pws", log=lambda _m: None)
+    on_disk = {f.name for f in copied}
+    check("every event stream copied", len(copied) == len(stream_names), str(on_disk))
+    for stream in stream_names:
+        ref = f"sound\\event\\iro\\source\\{stream}".encode() + b"\x00" * 20
+        rewritten = replace(ref, "iro_", "pws_").data.rstrip(b"\x00").decode()
+        leaf = rewritten.split("\\")[-1]
+        check(f"{stream} reference resolves", f"{leaf}.sngw" in on_disk, leaf)
+
     print("\na missing voice bank is reported, not swallowed")
     bare = Path(tempfile.mkdtemp()) / "g"
     (bare / "nativePCx64/chr/archive").mkdir(parents=True)
