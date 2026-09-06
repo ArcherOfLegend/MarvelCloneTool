@@ -141,17 +141,31 @@ def main():
         check(f"{name} select screen name plate written",
               (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_as_n"
                / f"n_{name}_BM_HQ_NOMIP_typeB_other.tex").is_file())
-        for slot in ("00", "01"):
-            check(f"{name} HP bar portrait {slot} written",
+        for slot in ["00", "01"]:
+            check(f"{name} HP portrait {slot} written",
                   (out_dir / "nativePCx64/ui/game/ga_hp_f"
                    / f"f_{name}{slot}_BM_HQ_NOMIP.tex").is_file())
+            check(f"{name} silhouette {slot} written",
+                  (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_body"
+                   / f"b_{name}{slot}_BM_HQ_NOMIP.tex").is_file())
         check(f"{name} ini block numbered past the existing one",
               "[Character2]" in report.ini_block)
         check(f"{name} ini uses SoundID", "SoundID=iro" in report.ini_block,
               report.ini_block.replace("\n", " | "))
 
     print("\nUI texture leaf renaming")
-    from mvcclone.clone import rename_ui_leaf, sound_archive_dir
+    from mvcclone.clone import costume_variants, rename_ui_leaf, sound_archive_dir
+
+    slots = [f"{i:02d}" for i in range(8)]
+    check("b_Ryu99 fans out to every costume plus 99",
+          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", slots)
+          == [f"b_RyA{s}_BM_HQ_NOMIP" for s in slots] + ["b_RyA99_BM_HQ_NOMIP"])
+    check("f_Ryu00 fans out to every costume",
+          costume_variants("f_Ryu00_BM_HQ_NOMIP", "Ryu", "RyA", slots)
+          == [f"f_RyA{s}_BM_HQ_NOMIP" for s in slots])
+    check("unnumbered name plate stays single",
+          costume_variants("n_Ryu_BM_HQ_NOMIP_typeB_other", "Ryu", "RyA", slots)
+          == ["n_RyA_BM_HQ_NOMIP_typeB_other"])
     ui_cases = [
         ("b_IronMan99_BM_HQ_NOMIP", BASE, "b_NEW99_BM_HQ_NOMIP"),
         ("n_IronMan_BM_HQ_NOMIP_typeB_other", BASE, "n_NEW_BM_HQ_NOMIP_typeB_other"),
@@ -164,6 +178,16 @@ def main():
     for leaf, base, want in ui_cases:
         got = rename_ui_leaf(leaf, base, "NEW")
         check(f"ui leaf {leaf}", got == want, got)
+
+    print("\na missing voice bank is reported, not swallowed")
+    bare = Path(tempfile.mkdtemp()) / "g"
+    (bare / "nativePCx64/chr/archive").mkdir(parents=True)
+    make_arc([ArcEntry(r"chr\IronMan\model\x", hash_for_ext("mod"), 0, 0, 0, 0, b"X")],
+             bare / "nativePCx64/chr/archive/0033_cmn.arc")
+    silent = run(CloneSpec(bare, Path(tempfile.mkdtemp()), "0033", BASE, "PwrSuit",
+                           ["00"], sound_id="iro"), log=lambda _m: None)
+    check("missing voice bank warns",
+          any("voice bank" in w for w in silent.warnings), str(silent.warnings))
 
     print("\nsound folder is discovered, not assumed")
     for layout in ("nativePCx64/sound/se/chr/archive", "sound/se/chr/archive"):

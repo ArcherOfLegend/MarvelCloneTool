@@ -1,3 +1,29 @@
+"""
+The port workflow from Yoshi's guide, as a job you can preview before running.
+
+Source layout in the game install:
+
+    nativePCx64/chr/archive/0033_00.arc  ... _07.arc   costumes
+    nativePCx64/chr/archive/0033_cmn.arc                shared assets
+    nativePCx64/chr/archive/0033_param.arc              shot files, shotlist
+    sound/se/chr/archive/0033_01.arc                    English voice bank
+    nativePCx64/ui/.../mnchs_en.arc                     select screen art
+
+Output, named after the clone instead of the numeric ID:
+
+    PwrSuit_00.arc ... PwrSuit_cmn.arc, PwrSuit_param.arc   -> chr/archive/
+    PwrSuit.arc                                             -> sound/se/chr/archive/
+    n_PwrSuit_BM_HQ_NOMIP_typeB_other.tex                   -> ui/chs/chs_b1p/chs_as_n/
+    b_PwrSuit99_BM_HQ_NOMIP.tex                             -> ui/chs/chs_b1p/chs_body/
+    a characters.ini block
+
+The search term differs per archive, and that is deliberate. cmn and the costume
+arcs use a leading backslash only, so material and effect references get caught
+along with folder references. param uses backslashes on both sides so only whole
+folder references in the shot files and shotlist are touched. Dropping the
+leading backslash anywhere would start hitting class names.
+"""
+
 from __future__ import annotations
 
 import re
@@ -396,6 +422,36 @@ def rename_ui_leaf(leaf: str, base: str, new: str) -> str:
     return re.sub(UI_NAME_RE_TEMPLATE.format(name=re.escape(base)), new, leaf)
 
 
+UI_SLOT_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(\d+)(?=_|$)"
+
+
+def costume_variants(leaf: str, base: str, new: str, costumes: list[str]) -> list[str]:
+    """
+    Renamed UI leaf names, fanned out across costume slots where relevant.
+
+    Some UI textures carry a slot number glued to the name. The base game may
+    ship only one of them, b_Ryu99, but the engine asks for a file per costume
+    the moment you hover a colour, and a miss is a fatal error rather than a
+    missing image. So a numbered leaf is emitted once per costume plus once at
+    its original number, and an unnumbered leaf is emitted as-is.
+    """
+    renamed = rename_ui_leaf(leaf, base, new)
+    match = re.search(UI_SLOT_RE_TEMPLATE.format(name=re.escape(base)), leaf)
+    if not match:
+        return [renamed]
+
+    original = match.group(1)
+    width = len(original)
+    slots = list(dict.fromkeys(list(costumes) + [original]))
+    out = []
+    for slot in slots:
+        slot = slot.zfill(width)
+        out.append(re.sub(
+            UI_SLOT_RE_TEMPLATE.format(name=re.escape(new)),
+            new + slot, renamed, count=1))
+    return list(dict.fromkeys(out))
+
+
 def find_ui_elements(game_dir: Path, base_name: str) -> list[tuple[str, Path | None, str]]:
     """
     Every UI texture belonging to a character, found rather than assumed.
@@ -423,7 +479,12 @@ def find_ui_elements(game_dir: Path, base_name: str) -> list[tuple[str, Path | N
                 seen.add((rel, leaf))
                 found.append((rel, None, leaf))
 
-        for arc_file in sorted(ui_root.rglob("*.arc")):
+    ui_arcs = sorted(ui_root.rglob("*.arc")) if ui_root.is_dir() else []
+    for pattern in ("mnchs*.arc", "mngame*.arc"):
+        ui_arcs += [p for p in game_dir.rglob(pattern) if p not in ui_arcs]
+
+    if True:
+        for arc_file in sorted(set(ui_arcs)):
             try:
                 arc = read_arc(arc_file)
             except ValueError:
@@ -457,10 +518,12 @@ def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]
     for rel, arc_file, leaf in elements:
         if arc_file is None:
             src = spec.game_dir / rel / f"{leaf}.tex"
-            dest = spec.out_dir / rel / f"{rename_ui_leaf(leaf, spec.base_name, spec.new_name)}.tex"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dest)
-            written.append(dest)
+            for new_leaf in costume_variants(
+                    leaf, spec.base_name, spec.new_name, spec.costumes):
+                dest = spec.out_dir / rel / f"{new_leaf}.tex"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, dest)
+                written.append(dest)
         else:
             by_arc.setdefault(arc_file, []).append((rel, leaf))
 
@@ -472,10 +535,12 @@ def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]
             if entry is None:
                 warnings.append(f"{leaf} vanished from {arc_file.name}")
                 continue
-            dest = spec.out_dir / rel / f"{rename_ui_leaf(leaf, spec.base_name, spec.new_name)}.tex"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(entry.data)
-            written.append(dest)
+            for new_leaf in costume_variants(
+                    leaf, spec.base_name, spec.new_name, spec.costumes):
+                dest = spec.out_dir / rel / f"{new_leaf}.tex"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(entry.data)
+                written.append(dest)
 
     log(f"{len(written)} UI textures written")
     for w in written:
@@ -529,9 +594,18 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
             continue
         report.arcs.append(clone_archive(spec, suffix, src, log))
 
-    missing = wanted - set(sources) - {"sound"}
+    # Sound used to be excluded from this check, which meant a wrong sound
+    # folder produced no warning at all. That is how the path bug survived a
+    # full run. It is reported like anything else now, and names the folder
+    # that was searched so a layout mismatch is obvious.
+    missing = wanted - set(sources)
     for m in sorted(missing):
-        report.warnings.append(f"{spec.char_id}_{m}.arc not found, skipped")
+        if m == "sound":
+            looked = spec.game_dir / sound_archive_dir(spec.game_dir)
+            report.warnings.append(
+                f"no voice bank at {looked}, so the clone has no sound of its own")
+        else:
+            report.warnings.append(f"{spec.char_id}_{m}.arc not found, skipped")
 
     if spec.include_ui:
         written, warns = copy_ui_elements(spec, log)
