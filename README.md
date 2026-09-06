@@ -1,10 +1,6 @@
 # MarvelCloneTool
 
-Clones a UMvC3 character into a Clone Engine slot. It does the whole port from
-[EternalYoshi's Quick Clone Engine Porting Guide](https://docs.google.com/document/d/1IS9ZvgCWHePc3wZ-j0RZnOuoccE93euUk4q8DyomOrw/edit)
-in one pass, without ThreeWorkTool or 010 Editor, and it lifts the guide's
-restriction that the clone name must have the same number of characters as the
-base character.
+Clones a UMvC3 character into a Clone Engine slot.
 
 ## Install
 
