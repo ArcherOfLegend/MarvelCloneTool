@@ -33,7 +33,8 @@ from pathlib import Path
 
 from .arc import Arc, read_arc, write_arc
 from .rename import (
-    Refusal, Replacement, _field_end, _slack, rename_path, replace,
+    Refusal, Replacement, _field_end, _slack, component_pattern,
+    rename_components, replace,
 )
 
 CHR_ARCHIVE = Path("nativePCx64/chr/archive")
@@ -44,7 +45,7 @@ UI_BODY_DIR = Path("nativePCx64/ui/chs/chs_b1p/chs_body")
 # suffix -> content search term, as a format string over {name}
 PASSES = {
     "cmn": "\\{name}",
-    "param": "\\{name}\\",
+    "param": "\\{name}",
     "costume": "\\{name}",
     "sound": None,      # handled by SOUND_PASSES, see clone_sound
 }
@@ -84,6 +85,7 @@ class CloneSpec:
     include_sound: bool = True
     include_ui: bool = True
     rename_sound_contents: bool = False
+    underscore_names: bool = True   # also rename IronMan_l0, n_IronMan_BM_HQ
 
     def __post_init__(self):
         self.game_dir = Path(self.game_dir)
@@ -189,7 +191,8 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
         old_term = term.format(name=spec.base_name)
         new_term = term.format(name=spec.new_name)
         for e in targets:
-            res = replace(e.data, old_term, new_term)
+            res = replace(e.data, old_term, new_term, whole_component=True,
+                          underscores=spec.underscore_names)
             if res.count or res.refused:
                 e.data = res.data
                 content_hits += res.count
@@ -200,7 +203,8 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
     path_renames = 0
     cap = arc.path_len - 1
     for e in targets:
-        renamed = rename_path(e.path, spec.base_name, spec.new_name)
+        renamed = rename_components(e.path, spec.base_name, spec.new_name,
+                                    underscores=spec.underscore_names)
         if renamed == e.path:
             continue
         if len(renamed.encode("ascii", "replace")) > cap:
@@ -337,13 +341,14 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
         for e in arc.entries:
             if share_sound and is_sound_entry(e):
                 continue
-            if spec.base_name in e.path:
+            if spec.base_name in re.split(r"[\\/]", e.path):
                 grown = len(e.path) - base_len
                 path_cap = min(path_cap, cap - grown)
             if term is None:
                 continue
             old_term = term.format(name=spec.base_name)
-            for m in re.finditer(re.escape(old_term.encode()), e.data):
+            for m in component_pattern(
+                    spec.base_name, underscores=spec.underscore_names).finditer(e.data):
                 room = _slack(e.data, _field_end(e.data, m.end(), 1), 1)
                 content_cap = min(content_cap, base_len + room)
 
@@ -351,6 +356,31 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
     reason = "the archive path field" if path_cap <= content_cap else "string padding"
     log(f"longest workable name is {limit} characters, bound by {reason}")
     return limit, reason
+
+
+def embedded_name_report(spec: CloneSpec) -> list[str]:
+    """
+    Paths where the name is not a standalone folder, for eyeballing.
+
+    These are the judgement calls. A leaf like IronMan_l0 clearly belongs to the
+    character and has to move with it. Something like toon_Storm_BM_HQ might be
+    shared with other characters, in which case renaming the clone's copy is
+    harmless but worth knowing about. Anything with no delimiter at all, the
+    StormSword and GenmuZero shape, is a move name and is never touched.
+    """
+    out = []
+    for suffix, src in find_sources(spec.game_dir, spec.char_id, spec.sound_lang).items():
+        if suffix == "sound":
+            continue
+        for e in read_arc(src).entries:
+            parts = re.split(r"[\\/]", e.path)
+            for part in parts:
+                if spec.base_name in part and part != spec.base_name:
+                    renamed = rename_components(part, spec.base_name, spec.new_name,
+                                                underscores=spec.underscore_names)
+                    verb = "renamed" if renamed != part else "left alone"
+                    out.append(f"{suffix}: {part} -> {verb}")
+    return sorted(set(out))
 
 
 def find_ui_arc(game_dir: Path) -> Path | None:

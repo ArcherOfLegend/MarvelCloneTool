@@ -137,6 +137,30 @@ def main():
         check(f"{name} ini uses SoundID", "SoundID=iro" in report.ini_block,
               report.ini_block.replace("\n", " | "))
 
+    print("\nnames embedded in asset names")
+    from mvcclone.rename import rename_components as rc
+    embedded = [
+        # (path, base, component-only result, underscore-tier result)
+        (r"chr\Storm\model\1p\Storm", "Storm", "NEW", "NEW"),
+        (r"chr\Storm\shot\StormSword", "Storm", "StormSword", "StormSword"),
+        (r"chr\Storm\shot\LightningStorm", "Storm", "LightningStorm", "LightningStorm"),
+        (r"chr\Sentinel\shot\SentinelForceBomb", "Sentinel",
+         "SentinelForceBomb", "SentinelForceBomb"),
+        (r"chr\Zero\shot\GenmuZero", "Zero", "GenmuZero", "GenmuZero"),
+        (r"chr\Vergil\model\MajinVergil_Tex01", "Vergil",
+         "MajinVergil_Tex01", "MajinVergil_Tex01"),
+        (r"chr\IronMan\motion\IronMan_l0", BASE, "IronMan_l0", "NEW_l0"),
+        (r"ui\game\ga_hp_n\n_IronMan_BM_HQ", BASE,
+         "n_IronMan_BM_HQ", "n_NEW_BM_HQ"),
+    ]
+    for path, base, plain, under in embedded:
+        leaf = lambda p: p.split("\\")[-1]
+        check(f"component: {leaf(path)}", leaf(rc(path, base, "NEW")) == plain,
+              leaf(rc(path, base, "NEW")))
+        check(f"underscore: {leaf(path)}",
+              leaf(rc(path, base, "NEW", underscores=True)) == under,
+              leaf(rc(path, base, "NEW", underscores=True)))
+
     print("\na sound ID that collides with the chr folder")
     from mvcclone.arc import Arc, write_arc
     from mvcclone.clone import clone_sound, detect_sound_id

@@ -24,7 +24,10 @@ from PyQt6.QtWidgets import (
 )
 
 from .arc import read_arc, unpack, verify_roundtrip
-from .clone import CloneSpec, detect_base_name, find_sources, install, run
+from .clone import (
+    CloneSpec, detect_base_name, embedded_name_report, find_sources, install,
+    max_name_length, run,
+)
 from .scan import Room, max_safe_length, scan_arc_paths, scan_tree, summarise
 
 
@@ -88,6 +91,11 @@ class Window(QMainWindow):
         self.want_ui = QCheckBox("Pull select screen art from mnchs_en.arc")
         self.want_ui.setChecked(True)
         self.deep_sound = QCheckBox("Rename inside the voice bank too")
+        self.underscores = QCheckBox("Rename underscore-delimited names")
+        self.underscores.setChecked(True)
+        self.underscores.setToolTip(
+            "Catches IronMan_l0.lmt and n_IronMan_BM_HQ. Never touches move "
+            "names like StormSword or GenmuZero.")
 
         form = QFormLayout()
         form.addRow("Game install", self._row(self.game_dir, pick_game))
@@ -103,6 +111,7 @@ class Window(QMainWindow):
         opts.addWidget(self.want_sound)
         opts.addWidget(self.want_ui)
         opts.addWidget(self.deep_sound)
+        opts.addWidget(self.underscores)
         opts_box = QGroupBox("Extras")
         opts_box.setLayout(opts)
 
@@ -203,6 +212,7 @@ class Window(QMainWindow):
             include_sound=self.want_sound.isChecked(),
             include_ui=self.want_ui.isChecked(),
             rename_sound_contents=self.deep_sound.isChecked(),
+            underscore_names=self.underscores.isChecked(),
         )
 
     def costume_slots(self) -> list[str]:
@@ -259,6 +269,13 @@ class Window(QMainWindow):
         def work(log):
             sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
             log(f"{len(sources)} archives: {', '.join(sorted(sources))}")
+            max_name_length(spec, log)
+            report = embedded_name_report(spec)
+            if report:
+                log(f"\n{len(report)} names embedded rather than standalone:")
+                for line in report:
+                    log(f"   {line}")
+                log("")
             all_hits = []
             for suffix, src in sorted(sources.items()):
                 ok, detail = verify_roundtrip(src)

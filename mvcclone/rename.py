@@ -85,6 +85,69 @@ def _slack(data: bytes, term: int, step: int) -> int:
     return max(0, n - step)
 
 
+def component_pattern(
+    name: str,
+    encoding: str = "ascii",
+    match_case: bool = True,
+    underscores: bool = False,
+):
+    r"""
+    Match `\name` only where it is a whole path component.
+
+    A raw substring search is not safe once a character's name also appears
+    inside its own asset names. Storm owns StormSword and LightningStorm,
+    Sentinel owns SentinelForceBomb, Zero owns ZeroBusterM and GenmuZero.
+    Searching for `\Storm` with a leading backslash alone still eats the front
+    of `\StormSword`; searching for `Storm` bare eats both ends.
+
+    Requiring a separator or a string terminator behind the name fixes both,
+    and it still catches a reference that ends at the name, which is what the
+    guide's no-trailing-backslash advice was reaching for.
+    """
+    step = 1 if encoding == "ascii" else 2
+    codec = "ascii" if step == 1 else "utf-16le"
+    flags = 0 if match_case else re.IGNORECASE
+
+    closers = ["\\", "/", "\x00"]
+    if underscores:
+        # Underscore counts as a delimiter too, which picks up leaf names like
+        # IronMan_l0.lmt and n_IronMan_BM_HQ_NOMIP_typeB. It deliberately still
+        # skips StormSword, GenmuZero and MajinVergil_Tex01, where the name runs
+        # straight into the neighbouring word with nothing between them.
+        closers.append("_")
+        openers = ["\\", "/", "_"]
+    else:
+        openers = ["\\", "/"]
+
+    before = b"|".join(re.escape(c.encode(codec)) for c in openers)
+    after = b"|".join(re.escape(c.encode(codec)) for c in closers)
+    body = re.escape(name.encode(codec))
+    return re.compile(b"(?<=" + before + b")" + body + b"(?=" + after + b")", flags)
+
+
+def rename_components(
+    path: str, old: str, new: str, match_case: bool = True, underscores: bool = False
+) -> str:
+    """
+    Rename whole components of an ARC internal path, never bare substrings.
+
+    With `underscores`, a component also matches when the name is delimited by
+    underscores inside it, so IronMan_l0 and n_IronMan_BM_HQ get renamed while
+    StormSword and GenmuZero do not.
+    """
+    flags = 0 if match_case else re.IGNORECASE
+    out = []
+    for part in re.split(r"([\\/])", path):
+        if part == old or (not match_case and part.lower() == old.lower()):
+            out.append(new)
+        elif underscores:
+            out.append(re.sub(
+                r"(?:(?<=^)|(?<=_))" + re.escape(old) + r"(?=_|$)", new, part, flags=flags))
+        else:
+            out.append(part)
+    return "".join(out)
+
+
 def replace(
     data: bytes,
     old: str,
@@ -92,6 +155,8 @@ def replace(
     *,
     encoding: str = "ascii",
     match_case: bool = True,
+    whole_component: bool = False,
+    underscores: bool = False,
 ) -> ReplaceResult:
     """
     Swap `old` for `new` throughout `data` without changing its length.
@@ -104,10 +169,17 @@ def replace(
     codec = "ascii" if step == 1 else "utf-16le"
     old_b = old.encode(codec)
     new_b = new.encode(codec)
+    if whole_component:
+        old_b = old.lstrip("\\").encode(codec)
+        new_b = new.lstrip("\\").encode(codec)
     delta = len(new_b) - len(old_b)
 
     flags = 0 if match_case else re.IGNORECASE
-    pattern = re.compile(re.escape(old_b), flags)
+    if whole_component:
+        pattern = component_pattern(
+            old.lstrip("\\"), encoding, match_case, underscores)
+    else:
+        pattern = re.compile(re.escape(old_b), flags)
 
     if delta == 0:
         # A lambda, not the literal bytes. These terms are full of backslashes
