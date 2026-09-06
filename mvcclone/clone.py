@@ -350,17 +350,10 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
     reason = "nothing found"
 
     for suffix, src in sources.items():
-        # The voice archive counts. Its srqr is not a rebuildable bank and has
-        # the tightest padding of anything the character owns, so skipping it
-        # produces a limit the clone then fails to meet.
         arc = read_arc(src)
         term = PASSES[kind_for_suffix(suffix)] or "\\{name}"
         cap = arc.path_len - 1
         for e in arc.entries:
-            # Count every path the rename would touch, not just the ones where
-            # the name is a standalone folder. IronMan_l0 and n_IronMan_BM_HQ
-            # grow too, and a path can contain the name more than once, which
-            # multiplies the growth.
             probe = spec.base_name + "\x01"
             if re.split(r"[\\/]", e.path)[0].lower() == "ui":
                 parts = re.split(r"([\\/])", e.path)
