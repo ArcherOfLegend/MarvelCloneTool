@@ -15,7 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mvcclone.arc import Arc, ArcEntry, hash_for_ext, read_arc, verify_roundtrip, write_arc
-from mvcclone.clone import CloneSpec, detect_base_name, find_sources, run
+from mvcclone.clone import (
+    CloneSpec, clone_archive, detect_base_name, find_sources, run,
+)
 from mvcclone.rename import replace
 
 BASE = "IronMan"
@@ -75,7 +77,14 @@ def build_install(root: Path):
         ArcEntry(r"ui\game\ga_hp_f\f_IronMan01_BM_HQ_NOMIP",
                  hash_for_ext("tex"), 0, 0, 0, 0, b"FACE1"),
     ]
-    sound = [ArcEntry(r"sound\se\iro\voice", hash_for_ext("sngw"), 0, 0, 0, 0, b"VOICE")]
+    sound = [
+        ArcEntry(r"sound\se\chr\IronMan\iro_vo_en\source\iro_001e",
+                 hash_for_ext("sngw"), 0, 0, 0, 0, b"VOICE"),
+        ArcEntry(r"sound\se\chr\IronMan\iro_vo_en\iro_vo_en",
+                 hash_for_ext("srqr"), 0, 0, 0, 0,
+                 rb"sound\se\chr\IronMan\iro_vo_en\source\iro_001e"
+                 + b"\x00\x79\xf8\x4d\x72"),
+    ]
 
     chr_dir = root / "nativePCx64/chr/archive"
     chr_dir.mkdir(parents=True)
@@ -115,7 +124,10 @@ def main():
         check(f"{name} keeps 64 bytes", len(out.data) == len(src), f"got {len(out.data)}")
 
     print("\nclone at several name lengths")
-    for name, expect_ok in (("Bob", True), ("PwrSuit", True), ("IronManJr", True),
+    # The packed sound banks pin the clone name to the base name's exact length,
+    # so only a 7 character name clones cleanly against IronMan.
+    for name, expect_ok in (("PwrSuit", True), ("Extreme", True),
+                            ("Bob", False), ("IronManJr", False),
                             ("SuperLongExtendedSuitNameHere", False)):
         out_dir = Path(tempfile.mkdtemp(prefix=f"out_{name}_"))
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -140,8 +152,14 @@ def main():
         check(f"{name} class reference untouched",
               b"ClassIronManThing" in param.entries[0].data)
 
-        check(f"{name} sound arc written",
-              (out_dir / "nativePCx64/sound/se/chr/archive" / f"{name}.arc").is_file())
+        voice = out_dir / "nativePCx64/sound/se/chr/archive" / f"{name}.arc"
+        check(f"{name} sound arc written", voice.is_file())
+        if voice.is_file():
+            # Rebuilt, not copied. The engine asks for the clone's own folder.
+            voice_paths = [e.path for e in read_arc(voice).entries]
+            check(f"{name} voice bank folder renamed",
+                  all(f"chr\\{name}\\" in p for p in voice_paths),
+                  str(voice_paths[:2]))
         check(f"{name} select screen silhouette written",
               (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_body"
                / f"b_{name}99_BM_HQ_NOMIP.tex").is_file())
@@ -163,6 +181,53 @@ def main():
               "[Character2]" in report.ini_block)
         check(f"{name} ini uses SoundID", "SoundID=iro" in report.ini_block,
               report.ini_block.replace("\n", " | "))
+
+    print("\nthe packed sound bank pins the clone name length")
+    packed_bank = [
+        ArcEntry(r"chr\IronMan\model\x", hash_for_ext("mod"), 0, 0, 0, 0,
+                 padded(r"\IronMan\model\1p", 48)),
+        # no padding behind the string, exactly like a real sbkr
+        ArcEntry(r"sound\se\chr\IronMan\iro_se\iro_se", hash_for_ext("sbkr"),
+                 0, 0, 0, 0,
+                 rb"sound\se\chr\IronMan\iro_se\source\iro_se_fx" + b"\x00\x79\xf8\x4d\x72"),
+    ]
+    pinned = Path(tempfile.mkdtemp()) / "g"
+    (pinned / "nativePCx64/chr/archive").mkdir(parents=True)
+    make_arc(packed_bank, pinned / "nativePCx64/chr/archive/0033_cmn.arc")
+
+    for candidate, want_ok in (("PwrSuit", True), ("Extremis", False), ("Bob", False)):
+        res = clone_archive(
+            CloneSpec(pinned, Path(tempfile.mkdtemp()), "0033", BASE, candidate),
+            "cmn", pinned / "nativePCx64/chr/archive/0033_cmn.arc", log=lambda _m: None)
+        check(f"{candidate} ({len(candidate)} vs 7) ok={want_ok}",
+              (not res.refused) is want_ok, f"{len(res.refused)} refusals")
+        if want_ok:
+            kept = read_arc(res.dest)
+            check(f"{candidate} keeps the sound ID, renames the folder",
+                  any(f"chr\\{candidate}\\iro_se" in e.path for e in kept.entries),
+                  str([e.path for e in kept.entries]))
+
+    print("\na custom sound ID reaches the SE bank in the character archives")
+    se_entries = [
+        ArcEntry(r"chr\IronMan\model\x", hash_for_ext("mod"), 0, 0, 0, 0,
+                 padded(r"\IronMan\model\1p", 48)),
+        ArcEntry(r"sound\se\chr\IronMan\iro_se\iro_se", hash_for_ext("sbkr"),
+                 0, 0, 0, 0,
+                 rb"sound\se\chr\IronMan\iro_se\source\iro_se_fx"
+                 + b"\x00\x79\xf8\x4d\x72"),
+    ]
+    se_game = Path(tempfile.mkdtemp()) / "g"
+    (se_game / "nativePCx64/chr/archive").mkdir(parents=True)
+    make_arc(se_entries, se_game / "nativePCx64/chr/archive/0033_cmn.arc")
+
+    for sid, want in (("", "iro_se"), ("qro", "qro_se")):
+        res = clone_archive(
+            CloneSpec(se_game, Path(tempfile.mkdtemp()), "0033", BASE, "IronMUA",
+                      base_sound_id="iro", new_sound_id=sid),
+            "cmn", se_game / "nativePCx64/chr/archive/0033_cmn.arc", log=lambda _m: None)
+        paths = [e.path for e in read_arc(res.dest).entries] if not res.refused else []
+        check(f"SE bank uses {want} when new_sound_id={sid!r}",
+              any(want in p for p in paths), str(paths))
 
     print("\nUI texture leaf renaming")
     from mvcclone.clone import costume_variants, rename_ui_leaf, sound_archive_dir

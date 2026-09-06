@@ -182,14 +182,20 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
     term = PASSES[kind]
     arc = read_arc(src)
 
-    # Character archives carry a handful of sound entries, and every string
-    # inside an embedded sbkr is packed with no padding at all. Those are the
-    # only references here that pin the name to a fixed length. Leaving them
-    # pointing at the base character costs nothing, since SoundID points there
-    # too, and it is what frees the name length everywhere else.
-    share_sound = not spec.rename_sound_contents
-    targets = [e for e in arc.entries if not (share_sound and is_sound_entry(e))]
-    skipped = len(arc.entries) - len(targets)
+    # Sound entries in a character archive get renamed like everything else.
+    #
+    # They cannot be skipped. The engine builds the SE bank path itself from
+    # characters.ini, as sound\se\chr\<CharacterID>\<SoundID>_se\<SoundID>_se,
+    # so a clone called RyA is asked for sound\se\chr\RyA\... no matter what the
+    # archive says. Leaving those entries on the base character means that file
+    # never exists and the game dies loading the match.
+    #
+    # The cost is real: every string inside the embedded sbkr is packed with no
+    # padding, so this is what pins the clone name to the base name's exact
+    # length. That is the guide's same-length rule, and it turns out to be a
+    # property of the sound bank rather than of 010 Editor after all.
+    targets = list(arc.entries)
+    skipped = 0
 
     content_hits = 0
     refused: list[Refusal] = []
@@ -207,6 +213,25 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
                     r.context = f"{e.filename}: {r.context}"
                 refused.extend(res.refused)
 
+    # A custom sound ID has to reach the SE bank that lives inside the character
+    # archives, not just the voice bank. characters.ini names one SoundID and the
+    # engine builds sound\se\chr\<CharacterID>\<SoundID>_se from it, so leaving
+    # the cmn arc on the old ID points it at a folder that does not exist.
+    base_sid, new_sid = spec.base_sound_id, spec.new_sound_id
+    if base_sid and new_sid and base_sid != new_sid:
+        sid_passes = [(f"{base_sid}_se", f"{new_sid}_se"),
+                      (f"\\{base_sid}\\", f"\\{new_sid}\\")]
+        for e in targets:
+            if not is_sound_entry(e):
+                continue
+            for old_s, new_s in sid_passes:
+                res = replace(e.data, old_s, new_s)
+                e.data = res.data
+                content_hits += res.count
+                for r in res.refused:
+                    r.context = f"{e.filename}: {r.context}"
+                refused.extend(res.refused)
+
     path_renames = 0
     cap = arc.path_len - 1
     for e in targets:
@@ -217,7 +242,12 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
         # names, so the UI rule applies there and the digit counts as a
         # delimiter. Miss this and the clone's HP portrait still points at the
         # base character, which is a fatal error the moment a round loads.
-        if re.split(r"[\\/]", e.path)[0].lower() == "ui":
+        if is_sound_entry(e) and base_sid and new_sid and base_sid != new_sid:
+            renamed = rename_components(e.path, spec.base_name, spec.new_name,
+                                        underscores=spec.underscore_names)
+            renamed = renamed.replace(f"{base_sid}_se", f"{new_sid}_se")
+            renamed = renamed.replace(f"\\{base_sid}\\", f"\\{new_sid}\\")
+        elif re.split(r"[\\/]", e.path)[0].lower() == "ui":
             parts = re.split(r"([\\/])", e.path)
             parts[-1] = rename_ui_leaf(parts[-1], spec.base_name, spec.new_name)
             renamed = "".join(parts)
@@ -237,7 +267,13 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
         path_renames += 1
 
     if refused:
-        log(f"{src.name}: {len(refused)} refusals, not writing an output")
+        if all("packed" in r.reason for r in refused):
+            log(f"{src.name}: {len(refused)} refusals, all in the packed sound bank. "
+                f"'{spec.new_name}' is {len(spec.new_name)} characters and "
+                f"'{spec.base_name}' is {len(spec.base_name)}; they have to match "
+                f"for the clone to have sound.")
+        else:
+            log(f"{src.name}: {len(refused)} refusals, not writing an output")
         return ArcResult(
             label=suffix, source=src, dest=Path(), entries=len(arc.entries),
             content_hits=content_hits, path_renames=path_renames, refused=refused,
@@ -287,8 +323,15 @@ def clone_sound(spec: CloneSpec, src: Path, log=print) -> ArcResult:
     base_sid = spec.base_sound_id or detect_sound_id(arc) or ""
     new_sid = spec.new_sound_id or base_sid
 
+    if not base_sid and new_sid:
+        raise ValueError(
+            f"asked for sound ID {new_sid!r} but could not find the current one "
+            f"in {src.name}")
     if not base_sid:
-        raise ValueError(f"could not find a sound ID in {src.name}")
+        # No detectable ID and none requested. The character folder still has to
+        # be renamed, and that pass does not need an ID, so carry on rather than
+        # failing the whole clone over a bank that is only named differently.
+        base_sid = new_sid = ""
 
     terms = {
         "base": spec.base_name, "new": spec.new_name,
@@ -346,7 +389,6 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
     Returns the smaller, plus which one bound it.
     """
     sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
-    share_sound = not spec.rename_sound_contents
     base_len = len(spec.base_name)
     content_cap, path_cap = 10**6, 10**6
     reason = "nothing found"
@@ -358,8 +400,6 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
         term = PASSES[kind_for_suffix(suffix)]
         cap = arc.path_len - 1
         for e in arc.entries:
-            if share_sound and is_sound_entry(e):
-                continue
             if spec.base_name in re.split(r"[\\/]", e.path):
                 grown = len(e.path) - base_len
                 path_cap = min(path_cap, cap - grown)
@@ -624,6 +664,13 @@ def build_ini_block(spec: CloneSpec, index: int) -> str:
 def run(spec: CloneSpec, log=print) -> CloneReport:
     report = CloneReport()
     sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
+
+    # Read the current sound ID off the voice bank before anything else, because
+    # the character archives need it too when a custom ID is requested.
+    if not spec.base_sound_id and "sound" in sources:
+        spec.base_sound_id = detect_sound_id(read_arc(sources["sound"])) or ""
+        if spec.base_sound_id:
+            log(f"sound ID is {spec.base_sound_id}")
     if not sources:
         raise FileNotFoundError(
             f"no archives for character {spec.char_id} under {spec.game_dir / CHR_ARCHIVE}"
@@ -636,7 +683,16 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
     for suffix, src in sources.items():
         if suffix not in wanted:
             continue
-        if suffix == "sound" and spec.rename_sound_contents:
+        if suffix == "sound":
+            # Always rebuilt, never copied. The voice bank declares
+            # sound\se\chr\<Base>\... and the engine asks for
+            # sound\se\chr\<CharacterID>\..., so a verbatim copy leaves the clone
+            # mute for exactly the same reason the SE bank did.
+            #
+            # The sound ID only changes if you asked for a new one. Leave it
+            # alone and the clone shares the base character's voice lines under
+            # its own folder, which is the common case and needs no event audio
+            # copied. Give it a new ID and the streamed event files come too.
             result = clone_sound(spec, src, log)
             report.arcs.append(result)
             if not result.refused:
@@ -646,13 +702,7 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
                 report.files.extend(files)
                 report.warnings.extend(warns)
             continue
-        if suffix == "sound":
-            dest = spec.out_dir / sound_archive_dir(spec.game_dir) / f"{spec.new_name}.arc"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dest)
-            log(f"{src.name} -> {dest.name}  copied verbatim")
-            report.arcs.append(ArcResult("sound", src, dest, 0, 0, 0))
-            continue
+
         report.arcs.append(clone_archive(spec, suffix, src, log))
 
     # Sound used to be excluded from this check, which meant a wrong sound
