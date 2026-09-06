@@ -41,6 +41,7 @@ class Window(QMainWindow):
         self.setWindowTitle("Clone Engine character porter")
         self.resize(1150, 780)
         self.job: Job | None = None
+        self.name_limit = 0
         self.report = None
         self.spec: CloneSpec | None = None
 
@@ -218,11 +219,21 @@ class Window(QMainWindow):
         base, new = self.base_name.text().strip(), self.new_name.text().strip()
         if not base or not new:
             return
-        if len(base) == len(new):
-            self.note.setText(f"Same length as {base}.")
+        if self.name_limit:
+            over = len(new) - self.name_limit
+            if over > 0:
+                self.note.setText(
+                    f"{len(new)} characters, {over} too many. {base} allows "
+                    f"{self.name_limit}."
+                )
+            else:
+                self.note.setText(
+                    f"{len(new)} of {self.name_limit} characters."
+                )
         else:
             self.note.setText(
                 f"{len(new)} characters against {base}'s {len(base)}. "
+                f"Read the name to get the limit for this character."
             )
 
     # actions
@@ -256,6 +267,25 @@ class Window(QMainWindow):
             self.console.appendPlainText(f"{pick.name} says the character ID is {name}")
         else:
             self.console.appendPlainText(f"Could not read a character ID out of {pick.name}")
+            return
+
+        # Only now, with the codename known. Measuring against an empty base name
+        # matches nothing, returns zero, and a zero max length locks the field.
+        try:
+            self.name_limit, bound = max_name_length(
+                self.build_spec(), log=lambda _m: None)
+        except Exception as exc:
+            self.name_limit = 0
+            self.console.appendPlainText(f"could not work out the name limit: {exc}")
+            return
+
+        if self.name_limit > 0:
+            self.new_name.setMaxLength(self.name_limit)
+            self.console.appendPlainText(
+                f"name limit is {self.name_limit} characters ({bound})")
+        else:
+            self.console.appendPlainText(
+                "name limit came out as zero, which is a bug. Leaving the field open.")
 
     def survey(self):
         spec = self.build_spec()
@@ -328,6 +358,12 @@ class Window(QMainWindow):
         spec = self.build_spec()
         if not (spec.base_name and spec.new_name):
             QMessageBox.warning(self, "Missing names", "Both names are needed.")
+            return
+        if self.name_limit and len(spec.new_name) > self.name_limit:
+            QMessageBox.warning(
+                self, "Name too long",
+                f"{spec.new_name!r} is {len(spec.new_name)} characters. "
+                f"{spec.base_name} allows {self.name_limit}.")
             return
         self.spec = spec
         self.console.clear()

@@ -1,27 +1,3 @@
-"""
-MT Framework ARC container read/write.
-
-Layout assumed (UMvC3 PC, nativePCx64/chr/archive/NNNN_CC.arc):
-
-    magic       char[4]   "ARC\\0"
-    version     u16
-    file_count  u16
-    <pad>       u32       present on some variants, autodetected
-
-    per entry:
-    path        char[N]   null padded, N is 64 or 128, autodetected
-    ext_hash    u32       JAMCRC of the lowercase extension
-    csize       u32       compressed size
-    dsize_flags u32       low 29 bits = decompressed size, top 3 bits = flags
-    offset      u32       absolute offset into the file
-
-Everything past the header is zlib. Some entries store raw bytes instead,
-so decompression falls back to the literal bytes on a zlib error.
-
-The autodetection exists because I have not byte-verified this against a real
-UMvC3 archive. run `verify_roundtrip` on a real file before trusting a repack.
-"""
-
 from __future__ import annotations
 
 import struct
@@ -40,14 +16,6 @@ def jamcrc(data: bytes) -> int:
     return (~zlib.crc32(data)) & 0xFFFFFFFF
 
 
-# The hash in each entry is JAMCRC of the MT Framework resource CLASS name, not
-# of the extension. Confirmed against a real UMvC3 sound archive:
-#   rSoundSourceMSADPCM -> 0x724df879, rSoundBank -> 0x15d782fb,
-#   rSoundRequest -> 0x1bcc4966, rSoundStreamRequest -> 0x167dbbff
-# The rest are the community's usual class-to-extension pairings and are
-# unconfirmed here. Adding one is a single line; getting one wrong costs
-# nothing, since an unrecognised hash falls through to a hex filename that
-# survives a repack untouched.
 RESOURCE_CLASSES = {
     # confirmed
     "rSoundSourceMSADPCM": "sngw",
@@ -221,11 +189,6 @@ def write_arc(arc: Arc, out_path: str | Path, compress: bool = True) -> Path:
     entry_size = arc.entry_size
     base = 8 + arc.header_pad
     header_end = base + len(arc.entries) * entry_size
-    # Real archives align the payload block well past the entry table. UMvC3's
-    # character and sound arcs start it at 0x8000. The entry table is a fixed
-    # size regardless of what we renamed, so the original offset always still
-    # fits and preserving it keeps the file byte-comparable to what the game
-    # shipped.
     data_start = arc.data_start if arc.data_start >= header_end else header_end
 
     blobs: list[bytes] = []
@@ -260,7 +223,6 @@ def write_arc(arc: Arc, out_path: str | Path, compress: bool = True) -> Path:
 
 
 def unpack(arc: Arc, out_dir: str | Path) -> list[Path]:
-    """Write every entry to disk, preserving internal directory structure."""
     out_dir = Path(out_dir)
     written = []
     for e in arc.entries:
@@ -273,13 +235,6 @@ def unpack(arc: Arc, out_dir: str | Path) -> list[Path]:
 
 
 def verify_roundtrip(src: str | Path) -> tuple[bool, str]:
-    """
-    Read an archive, write it back, read that. Compare entry tables and payloads.
-
-    Byte-identical output is not expected, zlib settings differ. What matters is
-    that every path, hash and payload survives the trip. Run this on a handful of
-    untouched archives before letting the tool near a real install.
-    """
     src = Path(src)
     a = read_arc(src)
     with tempfile.TemporaryDirectory(prefix="arc_roundtrip_") as scratch:

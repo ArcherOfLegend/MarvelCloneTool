@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import struct
 from dataclasses import dataclass
 
 BANK_MAGICS = (b"SBKR", b"SRQR", b"STQR")
@@ -81,3 +82,46 @@ def rename(data: bytes, replacements: list[tuple[str, str]]) -> tuple[bytes, int
 
     bank.records = rebuilt
     return bank.rebuild(), changed
+
+
+SRQR_MAGIC = b"SRQR"
+_TRAILING_STRING = re.compile(rb"sound[\\/][ -~]+")
+
+
+def _srqr_parts(data: bytes):
+    if data[:4] != SRQR_MAGIC:
+        return None
+    hits = list(_TRAILING_STRING.finditer(data))
+    if len(hits) != 1:
+        return None
+    m = hits[-1]
+    tail = data[m.end():]
+    if tail.strip(b"\x00"):
+        return None
+    return m.start(), m.end(), len(tail)
+
+
+def srqr_rename(data: bytes, replacements: list[tuple[str, str]]):
+    parts = _srqr_parts(data)
+    if parts is None:
+        return None
+    start, end, pad = parts
+
+    path = data[start:end].decode("ascii", "replace")
+    new_path = path
+    for old, new in replacements:
+        new_path = new_path.replace(old, new)
+    if new_path == path:
+        return data, 0
+
+    body = data[:start] + new_path.encode("ascii") + b"\x00"
+    size = len(body)
+    aligned = size + (-size % 16)
+    rebuilt = bytearray(body + b"\x00" * (aligned - size))
+
+    old_len, new_len = len(data), len(rebuilt)
+    if new_len != old_len:
+        for off in range(0x08, start - 8, 8):
+            if struct.unpack_from("<Q", rebuilt, off)[0] == old_len:
+                struct.pack_into("<Q", rebuilt, off, new_len)
+    return bytes(rebuilt), 1

@@ -158,6 +158,10 @@ def rename_sound_payload(data: bytes, pairs: list[tuple[str, str]]):
     if rebuilt is not None:
         return rebuilt[0], rebuilt[1], []
 
+    rebuilt = sound_bank.srqr_rename(data, pairs)
+    if rebuilt is not None:
+        return rebuilt[0], rebuilt[1], []
+
     hits, refused = 0, []
     for old, new in pairs:
         if old == new:
@@ -346,19 +350,34 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
     reason = "nothing found"
 
     for suffix, src in sources.items():
-        if suffix == "sound":
-            continue
+        # The voice archive counts. Its srqr is not a rebuildable bank and has
+        # the tightest padding of anything the character owns, so skipping it
+        # produces a limit the clone then fails to meet.
         arc = read_arc(src)
-        term = PASSES[kind_for_suffix(suffix)]
+        term = PASSES[kind_for_suffix(suffix)] or "\\{name}"
         cap = arc.path_len - 1
         for e in arc.entries:
-            if spec.base_name in re.split(r"[\\/]", e.path):
-                grown = len(e.path) - base_len
-                path_cap = min(path_cap, cap - grown)
+            # Count every path the rename would touch, not just the ones where
+            # the name is a standalone folder. IronMan_l0 and n_IronMan_BM_HQ
+            # grow too, and a path can contain the name more than once, which
+            # multiplies the growth.
+            probe = spec.base_name + "\x01"
+            if re.split(r"[\\/]", e.path)[0].lower() == "ui":
+                parts = re.split(r"([\\/])", e.path)
+                parts[-1] = rename_ui_leaf(parts[-1], spec.base_name, probe)
+                renamed = "".join(parts)
+            else:
+                renamed = rename_components(e.path, spec.base_name, probe,
+                                            underscores=spec.underscore_names)
+            hits = renamed.count("\x01")
+            if hits:
+                fixed = len(e.path) - hits * base_len
+                path_cap = min(path_cap, (cap - fixed) // hits)
             if term is None:
                 continue
-            if sound_bank.parse(e.data) is not None:
-                # Rebuilt from scratch, so its packed strings impose no limit.
+            if (sound_bank.parse(e.data) is not None
+                    or sound_bank.srqr_rename(e.data, []) is not None):
+                # Rebuilt from scratch, so its strings impose no limit.
                 continue
             old_term = term.format(name=spec.base_name)
             for m in component_pattern(
@@ -548,6 +567,20 @@ def next_character_index(ini_path: Path) -> int:
     return max(used) + 1 if used else 1
 
 
+def existing_character_ids(ini_path: Path) -> dict[str, int]:
+    """CharacterID -> block number, for every entry already in the ini."""
+    if not ini_path.is_file():
+        return {}
+    text = ini_path.read_text(errors="replace")
+    found = {}
+    for index, body in re.findall(
+            r"\[Character(\d+)\](.*?)(?=\[Character\d+\]|\Z)", text, re.S):
+        m = re.search(r"^\s*CharacterID\s*=\s*(.*?)\s*$", body, re.M)
+        if m and m.group(1):
+            found[m.group(1)] = int(index)
+    return found
+
+
 def build_ini_block(spec: CloneSpec, index: int) -> str:
     return (
         f"[Character{index}]\n"
@@ -577,6 +610,18 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
         raise FileNotFoundError(
             f"no archives for character {spec.char_id} under {spec.game_dir / CHR_ARCHIVE}"
         )
+
+    # The name goes inside the archives as well as in characters.ini, and some
+    # resources are loaded by CharacterID, so it cannot be shortened internally.
+    # Stop here rather than emit a half-renamed clone.
+    limit, bound_by = max_name_length(spec, log=lambda _m: None)
+    if len(spec.new_name) > limit:
+        raise ValueError(
+            f"{spec.new_name!r} is {len(spec.new_name)} characters. "
+            f"{spec.base_name} allows at most {limit} ({bound_by}). "
+            f"Pick a shorter name."
+        )
+    log(f"name limit for {spec.base_name} is {limit} characters ({bound_by})")
 
     wanted = set(spec.costumes) | {"cmn", "param"}
     if spec.include_sound:
@@ -613,6 +658,14 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
         report.warnings.extend(warns)
 
     ini_path = spec.game_dir / "nativePCx64" / "characters.ini"
+    # A duplicate CharacterID silently shadows an installed clone. With dozens
+    # of entries in a real ini that is easy to do and hard to spot afterwards.
+    taken = existing_character_ids(ini_path)
+    if spec.new_name in taken:
+        raise ValueError(
+            f"characters.ini already has CharacterID={spec.new_name} at "
+            f"[Character{taken[spec.new_name]}]. Pick a different name."
+        )
     index = next_character_index(ini_path)
     report.ini_block = build_ini_block(spec, index)
     block_file = spec.out_dir / "characters.ini.append.txt"

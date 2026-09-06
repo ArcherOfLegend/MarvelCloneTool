@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mvcclone.arc import Arc, ArcEntry, hash_for_ext, read_arc, verify_roundtrip, write_arc
 from mvcclone.clone import (
-    CloneSpec, clone_archive, detect_base_name, find_sources, run,
+    CloneSpec, clone_archive, detect_base_name, find_sources, max_name_length, run,
 )
 from mvcclone import sound_bank as sound_bank_mod
 from mvcclone.rename import replace
@@ -129,13 +129,18 @@ def main():
 
     print("\nclone at several name lengths")
     # Sound banks get rebuilt rather than patched, so any length works until the
-    # ARC header's 63 byte path field runs out.
+    # path field or a non-bank field runs out. Past that the name is rejected
+    # up front rather than producing a half-renamed clone.
     for name, expect_ok in (("PwrSuit", True), ("Bob", True), ("IronManJr", True),
                             ("SuperLongExtendedSuitNameHere", False)):
         out_dir = Path(tempfile.mkdtemp(prefix=f"out_{name}_"))
         shutil.rmtree(out_dir, ignore_errors=True)
         spec = CloneSpec(root, out_dir, "0033", BASE, name, ["00", "01"], sound_id="iro")
-        report = run(spec, log=lambda _m: None)
+        try:
+            report = run(spec, log=lambda _m: None)
+        except ValueError:
+            check(f"{name} ({len(name)} chars) rejected", not expect_ok)
+            continue
         check(f"{name} ({len(name)} chars) ok={expect_ok}", report.ok is expect_ok,
               f"{report.total_refusals} refusals")
 
@@ -286,6 +291,56 @@ def main():
                               out is not None and out[1] > 0
                               and f"\\{candidate}\\".encode() in out[0])
                 break
+
+    print("\nthe name limit is enforced before any work happens")
+    limit, _bound = max_name_length(
+        CloneSpec(root, Path(tempfile.mkdtemp()), "0033", BASE, "X"), log=lambda _m: None)
+    check("a limit was worked out", limit > 0, str(limit))
+    at_limit = "A" * limit
+    over_limit = "A" * (limit + 1)
+    ok_spec = CloneSpec(root, Path(tempfile.mkdtemp()), "0033", BASE, at_limit, ["00"])
+    check(f"a {limit} character name is accepted",
+          run(ok_spec, log=lambda _m: None).ok)
+    try:
+        run(CloneSpec(root, Path(tempfile.mkdtemp()), "0033", BASE, over_limit, ["00"]),
+            log=lambda _m: None)
+        check(f"a {limit + 1} character name is rejected", False, "it was accepted")
+    except ValueError:
+        check(f"a {limit + 1} character name is rejected", True)
+
+    print("\nthe srqr is rebuilt too, so it does not pin the limit")
+    real_cmn = Path("/mnt/user-data/uploads/0033_cmn.arc")
+    if real_cmn.is_file():
+        for entry in read_arc(real_cmn).entries:
+            if entry.data[:4] != b"SRQR":
+                continue
+            noop = sound_bank_mod.srqr_rename(entry.data, [("\\IronMan\\", "\\IronMan\\")])
+            check("srqr no-op is byte identical", noop is not None and noop[0] == entry.data)
+            for candidate in ("Bo", "Sakura", "AVeryMuchLongerName"):
+                out = sound_bank_mod.srqr_rename(
+                    entry.data, [("\\IronMan\\", f"\\{candidate}\\")])
+                check(f"srqr rebuilds for {candidate}",
+                      out is not None and f"\\{candidate}\\".encode() in out[0])
+            break
+
+    print("\nduplicate CharacterIDs are caught")
+    from mvcclone.clone import existing_character_ids
+
+    ini_dir = root / "nativePCx64"
+    ini_dir.mkdir(parents=True, exist_ok=True)
+    (ini_dir / "characters.ini").write_text(
+        "[Character1]\nCharacterID=Yun\nBaseCharacter=Ryu\n"
+        # trailing space, exactly as real files have it
+        "[Character2]\nCharacterID=Iceman \nBaseCharacter=Spencer\n")
+    ids = existing_character_ids(ini_dir / "characters.ini")
+    check("ids parsed", set(ids) == {"Yun", "Iceman"}, str(ids))
+    check("trailing space is trimmed off the id", "Iceman" in ids)
+    try:
+        run(CloneSpec(root, Path(tempfile.mkdtemp()), "0033", BASE, "Yun", ["00"]),
+            log=lambda _m: None)
+        check("a taken CharacterID is rejected", False, "it was accepted")
+    except ValueError:
+        check("a taken CharacterID is rejected", True)
 
     print("\nUI texture leaf renaming")
     from mvcclone.clone import costume_variants, rename_ui_leaf, sound_archive_dir
