@@ -1,12 +1,3 @@
-"""
-Headless check. Builds a synthetic install, clones it at several name lengths,
-and asserts the things that would silently corrupt an archive if they broke.
-
-    python tests/roundtrip.py
-
-No PyQt needed, so CI can run it on Linux.
-"""
-
 import shutil
 import sys
 import tempfile
@@ -18,6 +9,7 @@ from mvcclone.arc import Arc, ArcEntry, hash_for_ext, read_arc, verify_roundtrip
 from mvcclone.clone import (
     CloneSpec, clone_archive, detect_base_name, find_sources, run,
 )
+from mvcclone import sound_bank as sound_bank_mod
 from mvcclone.rename import replace
 
 BASE = "IronMan"
@@ -30,6 +22,19 @@ def check(label, condition, detail=""):
     else:
         print(f"  FAIL  {label}  {detail}")
         failures.append(label)
+
+
+def make_bank(paths, magic=b"SBKR"):
+    """A minimal but genuine sound bank: header, [path\\0][payload] records, trailer.
+
+    Matches the real layout measured off Iron Man's: a fixed header, records whose
+    stride tracks the string length, and no offset table anywhere.
+    """
+    header = magic + b"\x04\x00\x00\x00" + bytes(36)
+    body = b""
+    for path in paths:
+        body += path.encode() + b"\x00" + bytes(80)
+    return header + body + bytes(8)
 
 
 def padded(text, size):
@@ -81,9 +86,8 @@ def build_install(root: Path):
         ArcEntry(r"sound\se\chr\IronMan\iro_vo_en\source\iro_001e",
                  hash_for_ext("sngw"), 0, 0, 0, 0, b"VOICE"),
         ArcEntry(r"sound\se\chr\IronMan\iro_vo_en\iro_vo_en",
-                 hash_for_ext("srqr"), 0, 0, 0, 0,
-                 rb"sound\se\chr\IronMan\iro_vo_en\source\iro_001e"
-                 + b"\x00\x79\xf8\x4d\x72"),
+                 hash_for_ext("sbkr"), 0, 0, 0, 0,
+                 make_bank([r"sound\se\chr\IronMan\iro_vo_en\source\iro_001e"])),
     ]
 
     chr_dir = root / "nativePCx64/chr/archive"
@@ -124,10 +128,9 @@ def main():
         check(f"{name} keeps 64 bytes", len(out.data) == len(src), f"got {len(out.data)}")
 
     print("\nclone at several name lengths")
-    # The packed sound banks pin the clone name to the base name's exact length,
-    # so only a 7 character name clones cleanly against IronMan.
-    for name, expect_ok in (("PwrSuit", True), ("Extreme", True),
-                            ("Bob", False), ("IronManJr", False),
+    # Sound banks get rebuilt rather than patched, so any length works until the
+    # ARC header's 63 byte path field runs out.
+    for name, expect_ok in (("PwrSuit", True), ("Bob", True), ("IronManJr", True),
                             ("SuperLongExtendedSuitNameHere", False)):
         out_dir = Path(tempfile.mkdtemp(prefix=f"out_{name}_"))
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -182,20 +185,19 @@ def main():
         check(f"{name} ini uses SoundID", "SoundID=iro" in report.ini_block,
               report.ini_block.replace("\n", " | "))
 
-    print("\nthe packed sound bank pins the clone name length")
+    print("\nsound banks are rebuilt, so the name length is free")
     packed_bank = [
         ArcEntry(r"chr\IronMan\model\x", hash_for_ext("mod"), 0, 0, 0, 0,
                  padded(r"\IronMan\model\1p", 48)),
-        # no padding behind the string, exactly like a real sbkr
         ArcEntry(r"sound\se\chr\IronMan\iro_se\iro_se", hash_for_ext("sbkr"),
                  0, 0, 0, 0,
-                 rb"sound\se\chr\IronMan\iro_se\source\iro_se_fx" + b"\x00\x79\xf8\x4d\x72"),
+                 make_bank([r"sound\se\chr\IronMan\iro_se\source\iro_se_fx"])),
     ]
     pinned = Path(tempfile.mkdtemp()) / "g"
     (pinned / "nativePCx64/chr/archive").mkdir(parents=True)
     make_arc(packed_bank, pinned / "nativePCx64/chr/archive/0033_cmn.arc")
 
-    for candidate, want_ok in (("PwrSuit", True), ("Extremis", False), ("Bob", False)):
+    for candidate, want_ok in (("PwrSuit", True), ("Extremis", True), ("Bob", True)):
         res = clone_archive(
             CloneSpec(pinned, Path(tempfile.mkdtemp()), "0033", BASE, candidate),
             "cmn", pinned / "nativePCx64/chr/archive/0033_cmn.arc", log=lambda _m: None)
@@ -213,8 +215,7 @@ def main():
                  padded(r"\IronMan\model\1p", 48)),
         ArcEntry(r"sound\se\chr\IronMan\iro_se\iro_se", hash_for_ext("sbkr"),
                  0, 0, 0, 0,
-                 rb"sound\se\chr\IronMan\iro_se\source\iro_se_fx"
-                 + b"\x00\x79\xf8\x4d\x72"),
+                 make_bank([r"sound\se\chr\IronMan\iro_se\source\iro_se_fx"])),
     ]
     se_game = Path(tempfile.mkdtemp()) / "g"
     (se_game / "nativePCx64/chr/archive").mkdir(parents=True)
@@ -228,6 +229,63 @@ def main():
         paths = [e.path for e in read_arc(res.dest).entries] if not res.refused else []
         check(f"SE bank uses {want} when new_sound_id={sid!r}",
               any(want in p for p in paths), str(paths))
+
+    print("\nChris: sound ID 'chr' must not eat the chr container")
+    chris_cmn = [
+        ArcEntry(r"chr\Chris\model\1p\Chris", hash_for_ext("mod"), 0, 0, 0, 0,
+                 r"\Chris\model\1p".encode() + b"\x00" * 40),
+        ArcEntry(r"sound\se\chr\Chris\chr_se\chr_se", hash_for_ext("sbkr"),
+                 0, 0, 0, 0,
+                 make_bank([r"sound\se\chr\Chris\chr_se\source\cri_se_handgun"])),
+        ArcEntry(r"sound\se\chr\Chris\chr_se\source\cri_se_knife",
+                 hash_for_ext("sngw"), 0, 0, 0, 0, b"A"),
+    ]
+    chris_game = Path(tempfile.mkdtemp()) / "g"
+    (chris_game / "nativePCx64/chr/archive").mkdir(parents=True)
+    make_arc(chris_cmn, chris_game / "nativePCx64/chr/archive/0044_cmn.arc")
+
+    chris_res = clone_archive(
+        CloneSpec(chris_game, Path(tempfile.mkdtemp()), "0044", "Chris", "Zhris",
+                  base_sound_id="chr", new_sound_id="zhr"),
+        "cmn", chris_game / "nativePCx64/chr/archive/0044_cmn.arc", log=lambda _m: None)
+    check("Chris cmn clones cleanly", not chris_res.refused,
+          str([r.reason for r in chris_res.refused]))
+    if not chris_res.refused:
+        chris_paths = [e.path for e in read_arc(chris_res.dest).entries]
+        check("chr container survives a chr sound ID",
+              all(p.startswith(("chr\\", "sound\\se\\chr\\")) for p in chris_paths),
+              str(chris_paths))
+        check("SE folder became zhr_se",
+              any("zhr_se" in p for p in chris_paths), str(chris_paths))
+        check("cri_se_ file prefix left alone",
+              any("cri_se_knife" in p for p in chris_paths), str(chris_paths))
+
+    print("\nan unrecognised packed blob still refuses, rather than corrupting")
+    not_a_bank = rb"sound\se\chr\IronMan\iro_se\source\fx" + b"\x00\x79\xf8\x4d\x72"
+    check("no bank magic means no rebuild", sound_bank_mod.parse(not_a_bank) is None)
+    fallback = replace(not_a_bank, "\\IronMan\\", "\\Extremis\\")
+    check("fallback refuses a length change", not fallback.ok,
+          str(fallback.refused))
+
+    print("\nsound bank round trips and rebuilds at any length")
+    from mvcclone import sound_bank
+
+    real_cmn = Path("/mnt/user-data/uploads/0033_cmn.arc")
+    if real_cmn.is_file():
+        for entry in read_arc(real_cmn).entries:
+            if entry.data[:4] == b"SBKR":
+                parsed = sound_bank.parse(entry.data)
+                check("real sbkr parses", parsed is not None)
+                if parsed:
+                    check("real sbkr round trips byte for byte",
+                          parsed.rebuild() == entry.data)
+                    for candidate in ("Bo", "PwrSuit", "Christopher"):
+                        out = sound_bank.rename(
+                            entry.data, [("\\IronMan\\", f"\\{candidate}\\")])
+                        check(f"sbkr rebuilds for {candidate}",
+                              out is not None and out[1] > 0
+                              and f"\\{candidate}\\".encode() in out[0])
+                break
 
     print("\nUI texture leaf renaming")
     from mvcclone.clone import costume_variants, rename_ui_leaf, sound_archive_dir
@@ -321,20 +379,14 @@ def main():
     from mvcclone.arc import Arc, write_arc
     from mvcclone.clone import clone_sound, detect_sound_id
 
-    def packed(*strings):
-        out = b""
-        for text in strings:
-            out += text.encode() + b"\x00" + b"\x79\xf8\x4d\x72"
-        return out
-
     chris = [
         ArcEntry(r"sound\se\chr\Chris\chr_vo_en\source\chr_001e",
                  hash_for_ext("sngw"), 0, 0, 0, 0, b"RIFF"),
         ArcEntry(r"sound\se\chr\Chris\chr_vo_en\chr_vo_en",
                  hash_for_ext("sbkr"), 0, 0, 0, 0,
-                 packed(r"sound\se\chr\Chris\chr_vo_en\source\chr_001e")),
+                 make_bank([r"sound\se\chr\Chris\chr_vo_en\source\chr_001e"])),
         ArcEntry(r"sound\event\chr\chr_en", hash_for_ext("stqr"), 0, 0, 0, 0,
-                 packed(r"sound\event\chr\source\chr_038e")),
+                 make_bank([r"sound\event\chr\source\chr_038e"], b"STQR")),
     ]
     chris_arc = Path(tempfile.mkdtemp()) / "0044_01.arc"
     write_arc(Arc(version=7, entries=chris, path_len=64, header_pad=0), chris_arc)

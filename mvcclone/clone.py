@@ -5,6 +5,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import sound_bank
 from .arc import Arc, read_arc, write_arc
 from .rename import (
     Refusal, Replacement, _field_end, _slack, component_pattern,
@@ -12,9 +13,6 @@ from .rename import (
 )
 
 CHR_ARCHIVE = Path("nativePCx64/chr/archive")
-# Installs disagree on whether the sound tree sits at the root or under
-# nativePCx64, so the location is discovered rather than assumed, and output
-# mirrors wherever the source was actually found.
 SOUND_ARCHIVE_CANDIDATES = [
     Path("nativePCx64/sound/se/chr/archive"),
     Path("sound/se/chr/archive"),
@@ -56,13 +54,6 @@ PASSES = {
     "sound": None,      # handled by SOUND_PASSES, see clone_sound
 }
 
-# The voice bank carries two identifiers, not one: the character folder and a
-# short sound ID. Both are matched with delimiters, because the two collide in
-# real cases. Iron Man's ID is "iro", which is also the first three letters of
-# "IronMan". Chris's is "chr", which is also the name of the tree the character
-# folders live in, so the ID's own folder is anchored to sound\event\ rather
-# than matched as a bare path component. Checked against real archives: the
-# bare ID folder never appears anywhere except under sound\event\.
 SOUND_PASSES = [
     ("\\{base}\\", "\\{new}\\"),                                # sound\se\chr\IronMan\...
     ("sound\\event\\{base_sid}\\", "sound\\event\\{new_sid}\\"),  # sound\event\iro\...
@@ -84,10 +75,6 @@ class CloneSpec:
     new_name: str                 # "PwrSuit"
     costumes: list[str] = field(default_factory=list)   # ["00", "01", ...]
     sound_lang: str = "01"
-    # One ID the user sees, two the code needs. sound_id is what lands in
-    # characters.ini. base_sound_id is read off the voice bank. If they differ,
-    # the user asked for a custom ID and new_sound_id is derived from that, so
-    # there is nothing to tick and nothing to leave half configured.
     sound_id: str = ""
     base_sound_id: str = ""
     new_sound_id: str = ""
@@ -100,9 +87,6 @@ class CloneSpec:
     def __post_init__(self):
         self.game_dir = Path(self.game_dir)
         self.out_dir = Path(self.out_dir)
-        # NumColors is the palette count on the select screen, and each palette
-        # is one costume arc. Claiming more colours than you shipped points the
-        # game at files that are not there, so this is derived, never typed.
         if not self.num_colors:
             self.num_colors = len(self.costumes)
 
@@ -152,13 +136,6 @@ def find_sources(game_dir: Path, char_id: str, sound_lang: str = "01") -> dict[s
 
 
 def detect_base_name(arc: Arc) -> str | None:
-    """
-    Read the character's codename out of the archive's own path table.
-
-    Internal paths look like chr\\IronMan\\model\\1p\\... so the component after
-    chr is the name, spelled exactly the way the game spells it. Beats trusting
-    a character ID list that may not match your install.
-    """
     counts: dict[str, int] = {}
     for e in arc.entries:
         parts = re.split(r"[\\/]", e.path)
@@ -176,6 +153,22 @@ def kind_for_suffix(suffix: str) -> str:
     return "costume"
 
 
+def rename_sound_payload(data: bytes, pairs: list[tuple[str, str]]):
+    rebuilt = sound_bank.rename(data, pairs)
+    if rebuilt is not None:
+        return rebuilt[0], rebuilt[1], []
+
+    hits, refused = 0, []
+    for old, new in pairs:
+        if old == new:
+            continue
+        res = replace(data, old, new)
+        data = res.data
+        hits += res.count
+        refused.extend(res.refused)
+    return data, hits, refused
+
+
 def is_sound_entry(entry) -> bool:
     return re.split(r"[\\/]", entry.path)[0].lower() == "sound"
 
@@ -185,18 +178,6 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
     term = PASSES[kind]
     arc = read_arc(src)
 
-    # Sound entries in a character archive get renamed like everything else.
-    #
-    # They cannot be skipped. The engine builds the SE bank path itself from
-    # characters.ini, as sound\se\chr\<CharacterID>\<SoundID>_se\<SoundID>_se,
-    # so a clone called RyA is asked for sound\se\chr\RyA\... no matter what the
-    # archive says. Leaving those entries on the base character means that file
-    # never exists and the game dies loading the match.
-    #
-    # The cost is real: every string inside the embedded sbkr is packed with no
-    # padding, so this is what pins the clone name to the base name's exact
-    # length. That is the guide's same-length rule, and it turns out to be a
-    # property of the sound bank rather than of 010 Editor after all.
     targets = list(arc.entries)
     skipped = 0
 
@@ -207,6 +188,15 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
         old_term = term.format(name=spec.base_name)
         new_term = term.format(name=spec.new_name)
         for e in targets:
+            if is_sound_entry(e) and sound_bank.is_bank(e.data):
+                # Rebuilt rather than patched, so the name may change length.
+                e.data, hit, ref = rename_sound_payload(
+                    e.data, [(f"\\{spec.base_name}\\", f"\\{spec.new_name}\\")])
+                content_hits += hit
+                for r in ref:
+                    r.context = f"{e.filename}: {r.context}"
+                refused.extend(ref)
+                continue
             res = replace(e.data, old_term, new_term, whole_component=True,
                           underscores=spec.underscore_names)
             if res.count or res.refused:
@@ -216,40 +206,25 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
                     r.context = f"{e.filename}: {r.context}"
                 refused.extend(res.refused)
 
-    # A custom sound ID has to reach the SE bank that lives inside the character
-    # archives, not just the voice bank. characters.ini names one SoundID and the
-    # engine builds sound\se\chr\<CharacterID>\<SoundID>_se from it, so leaving
-    # the cmn arc on the old ID points it at a folder that does not exist.
     base_sid, new_sid = spec.base_sound_id, spec.new_sound_id
     if base_sid and new_sid and base_sid != new_sid:
-        sid_passes = [(f"{base_sid}_se", f"{new_sid}_se"),
-                      (f"\\{base_sid}\\", f"\\{new_sid}\\")]
+        sid_passes = [(f"{base_sid}_se", f"{new_sid}_se")]
         for e in targets:
             if not is_sound_entry(e):
                 continue
-            for old_s, new_s in sid_passes:
-                res = replace(e.data, old_s, new_s)
-                e.data = res.data
-                content_hits += res.count
-                for r in res.refused:
-                    r.context = f"{e.filename}: {r.context}"
-                refused.extend(res.refused)
+            e.data, hit, ref = rename_sound_payload(e.data, sid_passes)
+            content_hits += hit
+            for r in ref:
+                r.context = f"{e.filename}: {r.context}"
+            refused.extend(ref)
 
     path_renames = 0
     cap = arc.path_len - 1
     for e in targets:
-        # Character arcs carry their own UI textures, six per costume, named
-        # f_IronMan00_BM_HQ_NOMIP and friends. Those glue the costume number
-        # straight onto the name, which the asset rule refuses on purpose so it
-        # cannot eat move names like StormSword. Under ui\ there are no move
-        # names, so the UI rule applies there and the digit counts as a
-        # delimiter. Miss this and the clone's HP portrait still points at the
-        # base character, which is a fatal error the moment a round loads.
         if is_sound_entry(e) and base_sid and new_sid and base_sid != new_sid:
             renamed = rename_components(e.path, spec.base_name, spec.new_name,
                                         underscores=spec.underscore_names)
             renamed = renamed.replace(f"{base_sid}_se", f"{new_sid}_se")
-            renamed = renamed.replace(f"\\{base_sid}\\", f"\\{new_sid}\\")
         elif re.split(r"[\\/]", e.path)[0].lower() == "ui":
             parts = re.split(r"([\\/])", e.path)
             parts[-1] = rename_ui_leaf(parts[-1], spec.base_name, spec.new_name)
@@ -301,7 +276,6 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
 
 
 def detect_sound_id(arc: Arc) -> str | None:
-    """Read the short sound ID out of a voice bank's paths, e.g. iro_vo_en."""
     for e in arc.entries:
         m = SOUND_ID_PATTERN.search(e.path)
         if m:
@@ -310,18 +284,6 @@ def detect_sound_id(arc: Arc) -> str | None:
 
 
 def clone_sound(spec: CloneSpec, src: Path, log=print) -> ArcResult:
-    """
-    Rebuild the voice bank under the clone's own name and sound ID.
-
-    Only worth doing if the clone needs its own voice lines. If it shares the
-    base character's voice, copy the file instead and point SoundID at the base
-    ID, which is what the guide does and why it works.
-
-    Every string in the sbkr, srqr and stqr is packed with no padding and the
-    record stride tracks the string length, so any length change here has to
-    rebuild the whole table. Until someone writes that, both names must keep
-    their original lengths.
-    """
     arc = read_arc(src)
     base_sid = spec.base_sound_id or detect_sound_id(arc) or ""
     new_sid = spec.new_sound_id or base_sid
@@ -331,9 +293,6 @@ def clone_sound(spec: CloneSpec, src: Path, log=print) -> ArcResult:
             f"asked for sound ID {new_sid!r} but could not find the current one "
             f"in {src.name}")
     if not base_sid:
-        # No detectable ID and none requested. The character folder still has to
-        # be renamed, and that pass does not need an ID, so carry on rather than
-        # failing the whole clone over a bank that is only named differently.
         base_sid = new_sid = ""
 
     terms = {
@@ -343,17 +302,14 @@ def clone_sound(spec: CloneSpec, src: Path, log=print) -> ArcResult:
 
     hits = 0
     refused: list[Refusal] = []
+    pairs = [(o.format(**terms), n.format(**terms)) for o, n in SOUND_PASSES]
+    pairs = [(o, n) for o, n in pairs if o != n]
     for e in arc.entries:
-        for old_t, new_t in SOUND_PASSES:
-            old_s, new_s = old_t.format(**terms), new_t.format(**terms)
-            if old_s == new_s:
-                continue
-            res = replace(e.data, old_s, new_s)
-            e.data = res.data
-            hits += res.count
-            for r in res.refused:
-                r.context = f"{e.filename}: {r.context}"
-            refused.extend(res.refused)
+        e.data, hit, ref = rename_sound_payload(e.data, pairs)
+        hits += hit
+        for r in ref:
+            r.context = f"{e.filename}: {r.context}"
+        refused.extend(ref)
 
     path_renames = 0
     cap = arc.path_len - 1
@@ -384,13 +340,6 @@ def clone_sound(spec: CloneSpec, src: Path, log=print) -> ArcResult:
 
 
 def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
-    """
-    Longest clone name that fits, given the archives on disk.
-
-    Two ceilings. Content strings can only grow into whatever padding sits
-    behind them, and internal paths cannot exceed the header's field width.
-    Returns the smaller, plus which one bound it.
-    """
     sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
     base_len = len(spec.base_name)
     content_cap, path_cap = 10**6, 10**6
@@ -408,6 +357,9 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
                 path_cap = min(path_cap, cap - grown)
             if term is None:
                 continue
+            if sound_bank.parse(e.data) is not None:
+                # Rebuilt from scratch, so its packed strings impose no limit.
+                continue
             old_term = term.format(name=spec.base_name)
             for m in component_pattern(
                     spec.base_name, underscores=spec.underscore_names).finditer(e.data):
@@ -421,15 +373,6 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
 
 
 def embedded_name_report(spec: CloneSpec) -> list[str]:
-    """
-    Paths where the name is not a standalone folder, for eyeballing.
-
-    These are the judgement calls. A leaf like IronMan_l0 clearly belongs to the
-    character and has to move with it. Something like toon_Storm_BM_HQ might be
-    shared with other characters, in which case renaming the clone's copy is
-    harmless but worth knowing about. Anything with no delimiter at all, the
-    StormSword and GenmuZero shape, is a move name and is never touched.
-    """
     out = []
     for suffix, src in find_sources(spec.game_dir, spec.char_id, spec.sound_lang).items():
         if suffix == "sound":
@@ -447,17 +390,6 @@ def embedded_name_report(spec: CloneSpec) -> list[str]:
 
 def clone_sound_events(spec: CloneSpec, base_sid: str, new_sid: str, log=print
                        ) -> tuple[list[Path], list[str]]:
-    """
-    Copy the streamed event audio the voice bank points at.
-
-    The bank's stqr references paths like sound\\event\\iro\\source\\iro_038e, and
-    those files are not inside any arc. They sit loose on disk. Renaming the
-    references without copying the files leaves the clone pointing at audio that
-    does not exist under its new sound ID, so this mirrors the tree.
-
-    Only runs when the voice bank is being cloned. A clone that shares the base
-    character's SoundID also shares its event audio and needs none of this.
-    """
     written: list[Path] = []
     warnings: list[str] = []
 
@@ -468,17 +400,14 @@ def clone_sound_events(spec: CloneSpec, base_sid: str, new_sid: str, log=print
     src_dir = spec.game_dir / event_root / base_sid
     if not src_dir.is_dir():
         warnings.append(
-            f"no event audio at {src_dir}, so cinematic and stream sounds will be silent")
+            f"no event audio at {src_dir}."
+        )
         return written, warnings
 
     for src in sorted(src_dir.rglob("*")):
         if not src.is_file():
             continue
         rel = src.relative_to(src_dir)
-        # Exactly the rule the content pass uses, a bare "<sid>_" swap. It has
-        # to match, because that pass rewrites 2iro_018ce to 2pws_018ce inside
-        # the stqr, and a file still called 2iro_018ce would be a dangling
-        # reference. Same rule both sides or the clone loses audio.
         leaf = src.name.replace(f"{base_sid}_", f"{new_sid}_")
         dest = spec.out_dir / event_root / new_sid / rel.parent / leaf
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -498,15 +427,6 @@ UI_NAME_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(?=_|\d|$)"
 
 
 def rename_ui_leaf(leaf: str, base: str, new: str) -> str:
-    """
-    Rename a character name inside a UI texture's filename.
-
-    UI leaves are underscore separated and sometimes glue a number straight onto
-    the name: b_IronMan99_BM_HQ_NOMIP is the select screen silhouette,
-    f_Ryu00_BM_HQ_NOMIP is the in-game portrait for costume 00. So a trailing
-    digit counts as a delimiter here, unlike in asset paths where that would
-    start eating move names.
-    """
     return re.sub(UI_NAME_RE_TEMPLATE.format(name=re.escape(base)), new, leaf)
 
 
@@ -515,19 +435,6 @@ UI_SLOT_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(\d+)(?=_|$)"
 
 def costume_variants(leaf: str, base: str, new: str, costumes: list[str],
                      fan_out: bool = False) -> list[str]:
-    """
-    Renamed UI leaf names, optionally fanned out across costume slots.
-
-    Fanning out is off by default and should stay that way. Each costume arc
-    already ships its own per-costume UI set, six textures covering the HP
-    portrait, its border, both damaged variants, the results screen and the
-    select body, all numbered to match. Cloning the arc renames those, so the
-    numbered files exist without copying anything loose.
-
-    Duplicating a loose b_Ryu99 across 00 to 07 would shadow that per-costume
-    art with a single image, so it is only worth turning on if a character
-    turns out to be missing a numbered texture the engine still asks for.
-    """
     renamed = rename_ui_leaf(leaf, base, new)
     if not fan_out:
         return [renamed]
@@ -548,17 +455,6 @@ def costume_variants(leaf: str, base: str, new: str, costumes: list[str],
 
 
 def find_ui_elements(game_dir: Path, base_name: str) -> list[tuple[str, Path | None, str]]:
-    """
-    Every UI texture belonging to a character, found rather than assumed.
-
-    The guide names two, the select screen silhouette and name plate. There are
-    more. The in-game HP bar wants a face portrait per costume under
-    ui/game/ga_hp_f, and missing it takes the game down with a fatal error the
-    moment a round starts. Rather than keep guessing template names, this scans
-    the ui tree and every ui arc for anything carrying the character's name.
-
-    Returns (relative destination dir, containing arc or None if loose, leaf).
-    """
     game_dir = Path(game_dir)
     found: list[tuple[str, Path | None, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -598,15 +494,14 @@ def find_ui_elements(game_dir: Path, base_name: str) -> list[tuple[str, Path | N
 
 
 def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]:
-    """Write a renamed copy of every UI texture the character owns."""
     written: list[Path] = []
     warnings: list[str] = []
 
     elements = find_ui_elements(spec.game_dir, spec.base_name)
     if not elements:
         warnings.append(
-            "no UI textures found for this character, so the select screen and "
-            "HP bar art needs doing by hand")
+            "no UI textures found for this character"
+            )
         return written, warnings
 
     by_arc: dict[Path, list[tuple[str, str]]] = {}
@@ -668,8 +563,6 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
     report = CloneReport()
     sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
 
-    # Read the current sound ID off the voice bank before anything else, because
-    # the character archives need it too when a custom ID is requested.
     if not spec.base_sound_id and "sound" in sources:
         spec.base_sound_id = detect_sound_id(read_arc(sources["sound"])) or ""
 
@@ -693,15 +586,6 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
         if suffix not in wanted:
             continue
         if suffix == "sound":
-            # Always rebuilt, never copied. The voice bank declares
-            # sound\se\chr\<Base>\... and the engine asks for
-            # sound\se\chr\<CharacterID>\..., so a verbatim copy leaves the clone
-            # mute for exactly the same reason the SE bank did.
-            #
-            # The sound ID only changes if you asked for a new one. Leave it
-            # alone and the clone shares the base character's voice lines under
-            # its own folder, which is the common case and needs no event audio
-            # copied. Give it a new ID and the streamed event files come too.
             result = clone_sound(spec, src, log)
             report.arcs.append(result)
             if not result.refused:
@@ -714,10 +598,6 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
 
         report.arcs.append(clone_archive(spec, suffix, src, log))
 
-    # Sound used to be excluded from this check, which meant a wrong sound
-    # folder produced no warning at all. That is how the path bug survived a
-    # full run. It is reported like anything else now, and names the folder
-    # that was searched so a layout mismatch is obvious.
     missing = wanted - set(sources)
     for m in sorted(missing):
         if m == "sound":
@@ -741,13 +621,12 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
     report.files.append(block_file)
 
     if not spec.sound_id:
-        report.warnings.append("SoundID is empty, the clone will be silent until you set it")
+        report.warnings.append("SoundID is empty.")
 
     return report
 
 
 def install(spec: CloneSpec, report: CloneReport, log=print) -> list[Path]:
-    """Copy the staged output over the live install. Backs up characters.ini."""
     copied = []
     for root, _, files in __import__("os").walk(spec.out_dir):
         for f in files:
@@ -771,6 +650,6 @@ def install(spec: CloneSpec, report: CloneReport, log=print) -> list[Path]:
             fh.write("\n" + report.ini_block)
         log("appended the characters.ini block")
     else:
-        log("characters.ini not found, append the block yourself")
+        log("characters.ini not found.")
 
     return copied

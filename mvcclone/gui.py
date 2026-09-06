@@ -1,15 +1,3 @@
-"""
-PyQt6 front end.
-
-    pip install PyQt6
-    python -m mvcclone.gui
-
-Survey, then stage, then install. Survey tells you whether your chosen name
-fits. Stage builds everything into an output folder without touching the game.
-Install copies the staged files over and appends the characters.ini block,
-keeping a backup of the original ini.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -81,7 +69,7 @@ class Window(QMainWindow):
         self.sound_id.setPlaceholderText("read from the voice bank")
         self.sound_id.setToolTip(
             "Leave as detected to share the base character's voice. Type a "
-            "different three letter ID to give the clone its own sound.")
+            "different three letter ID to give the clone its own sound bank.")
         # Costume arcs run contiguously from 00, so a count says everything a
         # list would. Read name sets this to however many the character has.
         self.costumes = QSpinBox()
@@ -100,9 +88,6 @@ class Window(QMainWindow):
             "Off by default. The costume arcs already carry per-costume UI. "
             "Only turn this on if the game asks for a numbered texture that "
             "does not exist.")
-        self.underscores.setToolTip(
-            "Catches IronMan_l0.lmt and n_IronMan_BM_HQ. Never touches move "
-            "names like StormSword or GenmuZero.")
 
         form = QFormLayout()
         form.addRow("Game install", self._row(self.game_dir, pick_game))
@@ -226,7 +211,6 @@ class Window(QMainWindow):
         return [f"{i:02d}" for i in range(self.costumes.value())]
 
     def update_colour_count(self):
-        """NumColors follows the costume count. One palette, one costume arc."""
         slots = self.costume_slots()
         self.colour_count.setText(f"NumColors={len(slots)}, {slots[0]} to {slots[-1]}")
 
@@ -235,11 +219,10 @@ class Window(QMainWindow):
         if not base or not new:
             return
         if len(base) == len(new):
-            self.note.setText(f"Same length as {base}. This is the guide's safe path.")
+            self.note.setText(f"Same length as {base}.")
         else:
             self.note.setText(
                 f"{len(new)} characters against {base}'s {len(base)}. "
-                f"Survey first, padding has to absorb the difference."
             )
 
     # actions
@@ -270,14 +253,14 @@ class Window(QMainWindow):
         name = detect_base_name(read_arc(pick))
         if name:
             self.base_name.setText(name)
-            self.console.appendPlainText(f"{pick.name} says the codename is {name}")
+            self.console.appendPlainText(f"{pick.name} says the character ID is {name}")
         else:
-            self.console.appendPlainText(f"Could not read a codename out of {pick.name}")
+            self.console.appendPlainText(f"Could not read a character ID out of {pick.name}")
 
     def survey(self):
         spec = self.build_spec()
         if not spec.base_name:
-            QMessageBox.warning(self, "No codename", "Read the name off the archive first.")
+            QMessageBox.warning(self, "No character ID", "Read the character ID off the archive first.")
             return
 
         def work(log):
@@ -359,13 +342,11 @@ class Window(QMainWindow):
             total = sum(a.content_hits for a in report.arcs)
             self.note.setText(
                 f"Staged. {total} references rewritten across {len(report.arcs)} archives. "
-                f"Nothing has touched the game yet."
             )
             self.install_btn.setEnabled(True)
         else:
             self.note.setText(
                 f"{report.total_refusals} references would not fit. "
-                f"Shorten the name or leave those files alone. Not installing."
             )
             self.install_btn.setEnabled(False)
             for a in report.arcs:
@@ -387,7 +368,7 @@ class Window(QMainWindow):
             return
         self._start(
             lambda log: install(self.spec, self.report, log),
-            lambda copied: self.note.setText(f"Installed {len(copied)} files. Go test it."),
+            lambda copied: self.note.setText(f"Installed {len(copied)} files."),
         )
 
 
