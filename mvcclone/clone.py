@@ -84,13 +84,16 @@ class CloneSpec:
     new_name: str                 # "PwrSuit"
     costumes: list[str] = field(default_factory=list)   # ["00", "01", ...]
     sound_lang: str = "01"
-    sound_id: str = ""            # goes in characters.ini, e.g. "iro"
-    base_sound_id: str = ""       # detected from the bank when left blank
-    new_sound_id: str = ""        # only for a fully independent voice bank
+    # One ID the user sees, two the code needs. sound_id is what lands in
+    # characters.ini. base_sound_id is read off the voice bank. If they differ,
+    # the user asked for a custom ID and new_sound_id is derived from that, so
+    # there is nothing to tick and nothing to leave half configured.
+    sound_id: str = ""
+    base_sound_id: str = ""
+    new_sound_id: str = ""
     num_colors: int = 0           # 0 derives it from the costume list
     include_sound: bool = True
     include_ui: bool = True
-    rename_sound_contents: bool = False
     fan_out_ui: bool = False        # duplicate a numbered UI texture across costumes
     underscore_names: bool = True   # also rename IronMan_l0, n_IronMan_BM_HQ
 
@@ -669,8 +672,14 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
     # the character archives need it too when a custom ID is requested.
     if not spec.base_sound_id and "sound" in sources:
         spec.base_sound_id = detect_sound_id(read_arc(sources["sound"])) or ""
-        if spec.base_sound_id:
-            log(f"sound ID is {spec.base_sound_id}")
+
+    if not spec.sound_id:
+        spec.sound_id = spec.base_sound_id
+    if spec.sound_id and spec.base_sound_id and spec.sound_id != spec.base_sound_id:
+        spec.new_sound_id = spec.sound_id
+        log(f"custom sound ID: {spec.base_sound_id} becomes {spec.sound_id}")
+    elif spec.base_sound_id:
+        log(f"sound ID {spec.base_sound_id}, shared with the base character")
     if not sources:
         raise FileNotFoundError(
             f"no archives for character {spec.char_id} under {spec.game_dir / CHR_ARCHIVE}"

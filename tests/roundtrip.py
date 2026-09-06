@@ -341,7 +341,7 @@ def main():
 
     check("sound ID detected as chr", detect_sound_id(read_arc(chris_arc)) == "chr")
     spec = CloneSpec(root, Path(tempfile.mkdtemp()), "0044", "Chris", "Piers",
-                     new_sound_id="prs", rename_sound_contents=True)
+                     new_sound_id="prs")
     result = clone_sound(spec, chris_arc, log=lambda _m: None)
     check("Chris voice bank clones cleanly", not result.refused)
     if not result.refused:

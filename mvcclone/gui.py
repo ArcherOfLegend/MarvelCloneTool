@@ -25,8 +25,8 @@ from PyQt6.QtWidgets import (
 
 from .arc import read_arc, unpack, verify_roundtrip
 from .clone import (
-    CloneSpec, detect_base_name, embedded_name_report, find_sources, install,
-    max_name_length, run,
+    CloneSpec, detect_base_name, detect_sound_id, embedded_name_report,
+    find_sources, install, max_name_length, run,
 )
 from .scan import Room, max_safe_length, scan_arc_paths, scan_tree, summarise
 
@@ -78,7 +78,10 @@ class Window(QMainWindow):
         self.base_name.textChanged.connect(self.update_length_note)
 
         self.sound_id = QLineEdit()
-        self.sound_id.setPlaceholderText("iro")
+        self.sound_id.setPlaceholderText("read from the voice bank")
+        self.sound_id.setToolTip(
+            "Leave as detected to share the base character's voice. Type a "
+            "different three letter ID to give the clone its own sound.")
         # Costume arcs run contiguously from 00, so a count says everything a
         # list would. Read name sets this to however many the character has.
         self.costumes = QSpinBox()
@@ -90,7 +93,6 @@ class Window(QMainWindow):
         self.want_sound.setChecked(True)
         self.want_ui = QCheckBox("Pull select screen art from mnchs_en.arc")
         self.want_ui.setChecked(True)
-        self.deep_sound = QCheckBox("Rename inside the voice bank too")
         self.underscores = QCheckBox("Rename underscore-delimited names")
         self.underscores.setChecked(True)
         self.fan_out = QCheckBox("Duplicate numbered UI art across costumes")
@@ -115,7 +117,6 @@ class Window(QMainWindow):
         opts = QVBoxLayout()
         opts.addWidget(self.want_sound)
         opts.addWidget(self.want_ui)
-        opts.addWidget(self.deep_sound)
         opts.addWidget(self.underscores)
         opts.addWidget(self.fan_out)
         opts_box = QGroupBox("Extras")
@@ -217,7 +218,6 @@ class Window(QMainWindow):
             sound_id=self.sound_id.text().strip(),
             include_sound=self.want_sound.isChecked(),
             include_ui=self.want_ui.isChecked(),
-            rename_sound_contents=self.deep_sound.isChecked(),
             underscore_names=self.underscores.isChecked(),
             fan_out_ui=self.fan_out.isChecked(),
         )
@@ -259,6 +259,13 @@ class Window(QMainWindow):
             self.costumes.setValue(min(len(numbered), self.costumes.maximum()))
             self.console.appendPlainText(
                 f"found {len(numbered)} costume arcs, {numbered[0]} to {numbered[-1]}")
+
+        snd = sources.get("sound")
+        if snd is not None:
+            sid = detect_sound_id(read_arc(snd))
+            if sid:
+                self.sound_id.setText(sid)
+                self.console.appendPlainText(f"sound ID is {sid}")
 
         name = detect_base_name(read_arc(pick))
         if name:
