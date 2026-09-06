@@ -45,13 +45,24 @@ def _printable(chunk: bytes) -> str:
 
 
 def _slack_after(data: bytes, end: int, step: int) -> int:
-    """Count trailing null bytes after a match, in units of `step`."""
+    """
+    Usable padding for the string containing this match, in bytes.
+
+    Measured from the string's null terminator, not from the end of the match.
+    A hit in the middle of a path has non-null bytes right behind it and would
+    otherwise look packed when its field has plenty of room. The terminator
+    itself is discarded, since it belongs to the string rather than the padding.
+    """
+    unit = b"\x00" * step
+    term = end
+    while term + step <= len(data) and data[term:term + step] != unit:
+        term += step
     n = 0
-    i = end
-    while i + step <= len(data) and data[i:i + step] == b"\x00" * step:
-        n += 1
+    i = term
+    while i + step <= len(data) and data[i:i + step] == unit:
+        n += step
         i += step
-    return n
+    return max(0, n - step)
 
 
 def scan_bytes(data: bytes, name: str, label: str) -> list[Hit]:

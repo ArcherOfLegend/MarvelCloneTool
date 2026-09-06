@@ -76,11 +76,13 @@ class Window(QMainWindow):
 
         self.sound_id = QLineEdit()
         self.sound_id.setPlaceholderText("iro")
-        self.num_colors = QSpinBox()
-        self.num_colors.setRange(1, 12)
-        self.num_colors.setValue(8)
-
-        self.costumes = QLineEdit("00,01,02,03,04,05,06,07")
+        # Costume arcs run contiguously from 00, so a count says everything a
+        # list would. Read name sets this to however many the character has.
+        self.costumes = QSpinBox()
+        self.costumes.setRange(1, 16)
+        self.costumes.setValue(8)
+        self.costumes.valueChanged.connect(self.update_colour_count)
+        self.colour_count = QLabel()
         self.want_sound = QCheckBox("Clone the voice bank")
         self.want_sound.setChecked(True)
         self.want_ui = QCheckBox("Pull select screen art from mnchs_en.arc")
@@ -94,8 +96,8 @@ class Window(QMainWindow):
         form.addRow("Base codename", self.base_name)
         form.addRow("Clone name", self.new_name)
         form.addRow("Sound ID", self.sound_id)
-        form.addRow("Colours", self.num_colors)
         form.addRow("Costumes", self.costumes)
+        form.addRow("Colours", self.colour_count)
 
         opts = QVBoxLayout()
         opts.addWidget(self.want_sound)
@@ -155,6 +157,7 @@ class Window(QMainWindow):
         holder = QWidget()
         holder.setLayout(body)
         self.setCentralWidget(holder)
+        self.update_colour_count()
 
     # helpers
 
@@ -189,20 +192,26 @@ class Window(QMainWindow):
         self.console.appendPlainText(message)
 
     def build_spec(self) -> CloneSpec:
-        costumes = [c.strip() for c in self.costumes.text().split(",") if c.strip()]
         return CloneSpec(
             game_dir=Path(self.game_dir.text().strip()),
             out_dir=Path(self.out_dir.text().strip()),
             char_id=self.char_id.text().strip(),
             base_name=self.base_name.text().strip(),
             new_name=self.new_name.text().strip(),
-            costumes=costumes,
+            costumes=self.costume_slots(),
             sound_id=self.sound_id.text().strip(),
-            num_colors=self.num_colors.value(),
             include_sound=self.want_sound.isChecked(),
             include_ui=self.want_ui.isChecked(),
             rename_sound_contents=self.deep_sound.isChecked(),
         )
+
+    def costume_slots(self) -> list[str]:
+        return [f"{i:02d}" for i in range(self.costumes.value())]
+
+    def update_colour_count(self):
+        """NumColors follows the costume count. One palette, one costume arc."""
+        slots = self.costume_slots()
+        self.colour_count.setText(f"NumColors={len(slots)}, {slots[0]} to {slots[-1]}")
 
     def update_length_note(self):
         base, new = self.base_name.text().strip(), self.new_name.text().strip()
@@ -228,6 +237,12 @@ class Window(QMainWindow):
                 f"No archives for {spec.char_id} under that install."
             )
             return
+        numbered = sorted(k for k in sources if k.isdigit())
+        if numbered:
+            self.costumes.setValue(min(len(numbered), self.costumes.maximum()))
+            self.console.appendPlainText(
+                f"found {len(numbered)} costume arcs, {numbered[0]} to {numbered[-1]}")
+
         name = detect_base_name(read_arc(pick))
         if name:
             self.base_name.setText(name)

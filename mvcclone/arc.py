@@ -25,6 +25,7 @@ UMvC3 archive. run `verify_roundtrip` on a real file before trusting a repack.
 from __future__ import annotations
 
 import struct
+import tempfile
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,38 +40,67 @@ def jamcrc(data: bytes) -> int:
     return (~zlib.crc32(data)) & 0xFFFFFFFF
 
 
-# Extensions that show up in UMvC3 character archives. Hashes are derived at
-# import time rather than hardcoded, so adding a name here is the whole job.
-EXT_NAMES = [
-    "tex", "mod", "mrl", "lmt", "efl", "epv", "sdl", "xfs", "gmd", "chn",
-    "ccl", "rtex", "obja", "stq", "srqr", "sbkr", "wpb", "mss", "msd",
-    "lmcm", "cpi", "mlst", "htex", "spkg", "e2d", "sngw", "atk", "hit",
-    "cmd", "eft", "mtg", "rvt", "tde", "nmr", "sbc", "arc",
-]
+# The hash in each entry is JAMCRC of the MT Framework resource CLASS name, not
+# of the extension. Confirmed against a real UMvC3 sound archive:
+#   rSoundSourceMSADPCM -> 0x724df879, rSoundBank -> 0x15d782fb,
+#   rSoundRequest -> 0x1bcc4966, rSoundStreamRequest -> 0x167dbbff
+# The rest are the community's usual class-to-extension pairings and are
+# unconfirmed here. Adding one is a single line; getting one wrong costs
+# nothing, since an unrecognised hash falls through to a hex filename that
+# survives a repack untouched.
+RESOURCE_CLASSES = {
+    # confirmed
+    "rSoundSourceMSADPCM": "sngw",
+    "rSoundBank": "sbkr",
+    "rSoundRequest": "srqr",
+    "rSoundStreamRequest": "stqr",
+    # unconfirmed
+    "rTexture": "tex",
+    "rModel": "mod",
+    "rMaterial": "mrl",
+    "rMotionList": "lmt",
+    "rEffectList": "efl",
+    "rEffectAnim": "epv",
+    "rShaderPackage": "spkg",
+    "rScheduler": "sdl",
+    "rChain": "chn",
+    "rCollision": "sbc",
+    "rCameraList": "lcm",
+    "rSoundSequenceSe": "sqe",
+    "rSoundCurveSet": "scs",
+}
 
 
 def _build_ext_table() -> dict[int, str]:
     table: dict[int, str] = {}
-    for name in EXT_NAMES:
-        h = jamcrc(name.encode("ascii"))
-        table[h] = name
-        table[h & 0x7FFFFFFF] = name
+    for cls, ext in RESOURCE_CLASSES.items():
+        h = jamcrc(cls.encode("ascii"))
+        table[h] = ext
+        table[h & 0x7FFFFFFF] = ext
     return table
 
 
 EXT_BY_HASH = _build_ext_table()
+CLASS_BY_HASH = {
+    jamcrc(cls.encode("ascii")): cls for cls in RESOURCE_CLASSES
+}
 
 
 def ext_for_hash(h: int) -> str:
-    """Real extension if known, otherwise a hex placeholder that survives a repack."""
+    """Real extension if the class is known, otherwise a hex placeholder that
+    survives a repack."""
     return EXT_BY_HASH.get(h) or EXT_BY_HASH.get(h & 0x7FFFFFFF) or f"{h:08x}"
+
+
+def class_for_hash(h: int) -> str | None:
+    return CLASS_BY_HASH.get(h) or CLASS_BY_HASH.get(h & 0x7FFFFFFF)
 
 
 def hash_for_ext(ext: str) -> int:
     ext = ext.lstrip(".").lower()
-    for h, name in EXT_BY_HASH.items():
+    for cls, name in RESOURCE_CLASSES.items():
         if name == ext:
-            return h
+            return jamcrc(cls.encode("ascii"))
     if len(ext) == 8:
         try:
             return int(ext, 16)
@@ -104,6 +134,7 @@ class Arc:
     entries: list[ArcEntry] = field(default_factory=list)
     path_len: int = 64
     header_pad: int = 0      # bytes of padding after file_count
+    data_start: int = 0      # first payload offset in the original file
     source: Path | None = None
 
     @property
@@ -180,6 +211,8 @@ def read_arc(path: str | Path) -> Arc:
             offset=data_off,
             data=data,
         ))
+    if arc.entries:
+        arc.data_start = min(e.offset for e in arc.entries)
     return arc
 
 
@@ -187,7 +220,13 @@ def write_arc(arc: Arc, out_path: str | Path, compress: bool = True) -> Path:
     out_path = Path(out_path)
     entry_size = arc.entry_size
     base = 8 + arc.header_pad
-    data_start = base + len(arc.entries) * entry_size
+    header_end = base + len(arc.entries) * entry_size
+    # Real archives align the payload block well past the entry table. UMvC3's
+    # character and sound arcs start it at 0x8000. The entry table is a fixed
+    # size regardless of what we renamed, so the original offset always still
+    # fits and preserving it keeps the file byte-comparable to what the game
+    # shipped.
+    data_start = arc.data_start if arc.data_start >= header_end else header_end
 
     blobs: list[bytes] = []
     cursor = data_start
@@ -214,6 +253,7 @@ def write_arc(arc: Arc, out_path: str | Path, compress: bool = True) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("wb") as fh:
         fh.write(header)
+        fh.write(b"\x00" * (data_start - len(header)))
         for b in blobs:
             fh.write(b)
     return out_path
@@ -242,12 +282,10 @@ def verify_roundtrip(src: str | Path) -> tuple[bool, str]:
     """
     src = Path(src)
     a = read_arc(src)
-    tmp = src.with_suffix(".roundtrip.arc")
-    try:
+    with tempfile.TemporaryDirectory(prefix="arc_roundtrip_") as scratch:
+        tmp = Path(scratch) / src.name
         write_arc(a, tmp)
         b = read_arc(tmp)
-    finally:
-        pass
 
     if len(a.entries) != len(b.entries):
         return False, f"entry count changed: {len(a.entries)} -> {len(b.entries)}"
@@ -258,5 +296,4 @@ def verify_roundtrip(src: str | Path) -> tuple[bool, str]:
             return False, f"{x.path}: ext hash changed"
         if x.data != y.data:
             return False, f"{x.path}: payload changed ({len(x.data)} -> {len(y.data)} bytes)"
-    tmp.unlink(missing_ok=True)
     return True, f"{len(a.entries)} entries survived the round trip"

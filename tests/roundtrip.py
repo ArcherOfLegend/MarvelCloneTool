@@ -134,6 +134,62 @@ def main():
                / f"b_{name}99_BM_HQ_NOMIP.tex").is_file())
         check(f"{name} ini block numbered past the existing one",
               "[Character2]" in report.ini_block)
+        check(f"{name} ini uses SoundID", "SoundID=iro" in report.ini_block,
+              report.ini_block.replace("\n", " | "))
+
+    print("\na sound ID that collides with the chr folder")
+    from mvcclone.arc import Arc, write_arc
+    from mvcclone.clone import clone_sound, detect_sound_id
+
+    def packed(*strings):
+        out = b""
+        for text in strings:
+            out += text.encode() + b"\x00" + b"\x79\xf8\x4d\x72"
+        return out
+
+    chris = [
+        ArcEntry(r"sound\se\chr\Chris\chr_vo_en\source\chr_001e",
+                 hash_for_ext("sngw"), 0, 0, 0, 0, b"RIFF"),
+        ArcEntry(r"sound\se\chr\Chris\chr_vo_en\chr_vo_en",
+                 hash_for_ext("sbkr"), 0, 0, 0, 0,
+                 packed(r"sound\se\chr\Chris\chr_vo_en\source\chr_001e")),
+        ArcEntry(r"sound\event\chr\chr_en", hash_for_ext("stqr"), 0, 0, 0, 0,
+                 packed(r"sound\event\chr\source\chr_038e")),
+    ]
+    chris_arc = Path(tempfile.mkdtemp()) / "0044_01.arc"
+    write_arc(Arc(version=7, entries=chris, path_len=64, header_pad=0), chris_arc)
+
+    check("sound ID detected as chr", detect_sound_id(read_arc(chris_arc)) == "chr")
+    spec = CloneSpec(root, Path(tempfile.mkdtemp()), "0044", "Chris", "Piers",
+                     new_sound_id="prs", rename_sound_contents=True)
+    result = clone_sound(spec, chris_arc, log=lambda _m: None)
+    check("Chris voice bank clones cleanly", not result.refused)
+    if not result.refused:
+        cloned = read_arc(result.dest)
+        check("chr folder survives a chr sound ID",
+              all(p.startswith("sound\\se\\chr\\") or p.startswith("sound\\event\\prs\\")
+                  for p in (e.path for e in cloned.entries)),
+              str([e.path for e in cloned.entries]))
+        check("no Chris left behind",
+              not any("Chris" in e.path for e in cloned.entries))
+
+    print("\nNumColors follows the costume list")
+    for costumes in (["00", "01"], ["00", "01", "02", "03", "04", "05", "06", "07"]):
+        spec = CloneSpec(root, Path(tempfile.mkdtemp()), "0033", BASE, "PwrSuit",
+                         costumes, sound_id="iro")
+        check(f"{len(costumes)} costumes gives NumColors={len(costumes)}",
+              spec.num_colors == len(costumes), f"got {spec.num_colors}")
+
+    print("\npacked fields refuse any length change")
+    packed = b"name\x00" + b"\x79\xf8\x4d\x72"      # string then a hash, no padding
+    for new, want_ok in (("nick", True), ("no", False), ("longer", False)):
+        r = replace(packed, "name", new)
+        check(f"packed 'name' -> '{new}' ok={want_ok}", r.ok is want_ok,
+              r.refused[0].reason if r.refused else "")
+    padded_field = b"name" + b"\x00" * 8
+    for new, want_ok in (("no", True), ("muchlongername", False)):
+        r = replace(padded_field, "name", new)
+        check(f"padded 'name' -> '{new}' ok={want_ok}", r.ok is want_ok)
 
     print()
     if failures:

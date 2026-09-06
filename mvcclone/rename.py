@@ -69,14 +69,20 @@ def _field_end(data: bytes, start: int, step: int) -> int:
 
 
 def _slack(data: bytes, term: int, step: int) -> int:
-    """Bytes of contiguous null padding starting at the terminator."""
+    """
+    Usable padding after a string, in bytes.
+
+    Counts contiguous nulls from the terminator and then discards one, because
+    the terminator itself is part of the string, not spare room. Get this wrong
+    and every packed null-terminated string looks like it has a byte to spare.
+    """
     n = 0
     i = term
     unit = b"\x00" * step
     while i + step <= len(data) and data[i:i + step] == unit:
         n += step
         i += step
-    return n
+    return max(0, n - step)
 
 
 def replace(
@@ -125,6 +131,20 @@ def replace(
         term = _field_end(buf, e, step)
         room = _slack(buf, term, step)
         tail = bytes(buf[e:term])
+
+        if room == 0:
+            # No padding at all means this is not a fixed-size buffer, it is a
+            # packed record whose stride tracks the string length. Writing a
+            # shorter name here would leave stray nulls between the string and
+            # whatever follows it, which is just as broken as overrunning.
+            # Confirmed against a real rSoundBank: stride moves byte for byte
+            # with the string.
+            refused.append(Refusal(
+                s, encoding,
+                f"packed field with no padding, length must stay at {len(old_b)}",
+                _printable(bytes(buf[max(0, s - 16):term + 16])),
+            ))
+            continue
 
         if delta > room:
             refused.append(Refusal(

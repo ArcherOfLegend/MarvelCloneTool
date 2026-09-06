@@ -32,7 +32,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .arc import Arc, read_arc, write_arc
-from .rename import Refusal, Replacement, rename_path, replace
+from .rename import (
+    Refusal, Replacement, _field_end, _slack, rename_path, replace,
+)
 
 CHR_ARCHIVE = Path("nativePCx64/chr/archive")
 SOUND_ARCHIVE = Path("sound/se/chr/archive")
@@ -44,8 +46,23 @@ PASSES = {
     "cmn": "\\{name}",
     "param": "\\{name}\\",
     "costume": "\\{name}",
-    "sound": None,      # copied verbatim, contents untouched
+    "sound": None,      # handled by SOUND_PASSES, see clone_sound
 }
+
+# The voice bank carries two identifiers, not one: the character folder and a
+# short sound ID. Both are matched with delimiters, because the two collide in
+# real cases. Iron Man's ID is "iro", which is also the first three letters of
+# "IronMan". Chris's is "chr", which is also the name of the tree the character
+# folders live in, so the ID's own folder is anchored to sound\event\ rather
+# than matched as a bare path component. Checked against real archives: the
+# bare ID folder never appears anywhere except under sound\event\.
+SOUND_PASSES = [
+    ("\\{base}\\", "\\{new}\\"),                                # sound\se\chr\IronMan\...
+    ("sound\\event\\{base_sid}\\", "sound\\event\\{new_sid}\\"),  # sound\event\iro\...
+    ("{base_sid}_", "{new_sid}_"),                              # iro_vo_en, iro_001e, iro_en
+]
+
+SOUND_ID_PATTERN = re.compile(r"[\\/]([a-z0-9]{2,5})_vo_", re.IGNORECASE)
 
 UI_NAME_TEMPLATE = "n_{name}_BM_HQ_NOMIP_typeB_other"
 UI_BODY_TEMPLATE = "b_{name}99_BM_HQ_NOMIP"
@@ -60,8 +77,10 @@ class CloneSpec:
     new_name: str                 # "PwrSuit"
     costumes: list[str] = field(default_factory=list)   # ["00", "01", ...]
     sound_lang: str = "01"
-    sound_id: str = ""            # 3 letter code for characters.ini, e.g. "iro"
-    num_colors: int = 8
+    sound_id: str = ""            # goes in characters.ini, e.g. "iro"
+    base_sound_id: str = ""       # detected from the bank when left blank
+    new_sound_id: str = ""        # only for a fully independent voice bank
+    num_colors: int = 0           # 0 derives it from the costume list
     include_sound: bool = True
     include_ui: bool = True
     rename_sound_contents: bool = False
@@ -69,6 +88,11 @@ class CloneSpec:
     def __post_init__(self):
         self.game_dir = Path(self.game_dir)
         self.out_dir = Path(self.out_dir)
+        # NumColors is the palette count on the select screen, and each palette
+        # is one costume arc. Claiming more colours than you shipped points the
+        # game at files that are not there, so this is derived, never typed.
+        if not self.num_colors:
+            self.num_colors = len(self.costumes)
 
 
 @dataclass
@@ -140,10 +164,23 @@ def kind_for_suffix(suffix: str) -> str:
     return "costume"
 
 
+def is_sound_entry(entry) -> bool:
+    return re.split(r"[\\/]", entry.path)[0].lower() == "sound"
+
+
 def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResult:
     kind = kind_for_suffix(suffix)
     term = PASSES[kind]
     arc = read_arc(src)
+
+    # Character archives carry a handful of sound entries, and every string
+    # inside an embedded sbkr is packed with no padding at all. Those are the
+    # only references here that pin the name to a fixed length. Leaving them
+    # pointing at the base character costs nothing, since SoundID points there
+    # too, and it is what frees the name length everywhere else.
+    share_sound = not spec.rename_sound_contents
+    targets = [e for e in arc.entries if not (share_sound and is_sound_entry(e))]
+    skipped = len(arc.entries) - len(targets)
 
     content_hits = 0
     refused: list[Refusal] = []
@@ -151,7 +188,7 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
     if term is not None:
         old_term = term.format(name=spec.base_name)
         new_term = term.format(name=spec.new_name)
-        for e in arc.entries:
+        for e in targets:
             res = replace(e.data, old_term, new_term)
             if res.count or res.refused:
                 e.data = res.data
@@ -162,7 +199,7 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
 
     path_renames = 0
     cap = arc.path_len - 1
-    for e in arc.entries:
+    for e in targets:
         renamed = rename_path(e.path, spec.base_name, spec.new_name)
         if renamed == e.path:
             continue
@@ -192,12 +229,128 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
     write_arc(arc, dest)
     log(f"{src.name} -> {dest.name}  "
         f"{content_hits} in contents, {path_renames} paths"
+        + (f", {skipped} sound entries left on the base character" if skipped else "")
         + (f", {len(refused)} REFUSED" if refused else ""))
 
     return ArcResult(
         label=suffix, source=src, dest=dest, entries=len(arc.entries),
         content_hits=content_hits, path_renames=path_renames, refused=refused,
     )
+
+
+def detect_sound_id(arc: Arc) -> str | None:
+    """Read the short sound ID out of a voice bank's paths, e.g. iro_vo_en."""
+    for e in arc.entries:
+        m = SOUND_ID_PATTERN.search(e.path)
+        if m:
+            return m.group(1)
+    return None
+
+
+def clone_sound(spec: CloneSpec, src: Path, log=print) -> ArcResult:
+    """
+    Rebuild the voice bank under the clone's own name and sound ID.
+
+    Only worth doing if the clone needs its own voice lines. If it shares the
+    base character's voice, copy the file instead and point SoundID at the base
+    ID, which is what the guide does and why it works.
+
+    Every string in the sbkr, srqr and stqr is packed with no padding and the
+    record stride tracks the string length, so any length change here has to
+    rebuild the whole table. Until someone writes that, both names must keep
+    their original lengths.
+    """
+    arc = read_arc(src)
+    base_sid = spec.base_sound_id or detect_sound_id(arc) or ""
+    new_sid = spec.new_sound_id or base_sid
+
+    if not base_sid:
+        raise ValueError(f"could not find a sound ID in {src.name}")
+
+    terms = {
+        "base": spec.base_name, "new": spec.new_name,
+        "base_sid": base_sid, "new_sid": new_sid,
+    }
+
+    hits = 0
+    refused: list[Refusal] = []
+    for e in arc.entries:
+        for old_t, new_t in SOUND_PASSES:
+            old_s, new_s = old_t.format(**terms), new_t.format(**terms)
+            if old_s == new_s:
+                continue
+            res = replace(e.data, old_s, new_s)
+            e.data = res.data
+            hits += res.count
+            for r in res.refused:
+                r.context = f"{e.filename}: {r.context}"
+            refused.extend(res.refused)
+
+    path_renames = 0
+    cap = arc.path_len - 1
+    for e in arc.entries:
+        renamed = e.path
+        for old_t, new_t in SOUND_PASSES:
+            renamed = renamed.replace(old_t.format(**terms), new_t.format(**terms))
+        if renamed == e.path:
+            continue
+        if len(renamed.encode("ascii", "replace")) > cap:
+            refused.append(Refusal(
+                -1, "path",
+                f"internal path would be {len(renamed)} bytes, the field holds {cap}",
+                renamed))
+            continue
+        e.path = renamed
+        path_renames += 1
+
+    dest = spec.out_dir / SOUND_ARCHIVE / f"{spec.new_name}.arc"
+    if refused:
+        log(f"{src.name}: {len(refused)} refusals, voice bank not written")
+        return ArcResult("sound", src, Path(), len(arc.entries), hits, path_renames, refused)
+
+    write_arc(arc, dest)
+    log(f"{src.name} -> {dest.name}  sound ID {base_sid} to {new_sid}, "
+        f"{hits} in contents, {path_renames} paths")
+    return ArcResult("sound", src, dest, len(arc.entries), hits, path_renames)
+
+
+def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
+    """
+    Longest clone name that fits, given the archives on disk.
+
+    Two ceilings. Content strings can only grow into whatever padding sits
+    behind them, and internal paths cannot exceed the header's field width.
+    Returns the smaller, plus which one bound it.
+    """
+    sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
+    share_sound = not spec.rename_sound_contents
+    base_len = len(spec.base_name)
+    content_cap, path_cap = 10**6, 10**6
+    reason = "nothing found"
+
+    for suffix, src in sources.items():
+        if suffix == "sound":
+            continue
+        arc = read_arc(src)
+        term = PASSES[kind_for_suffix(suffix)]
+        cap = arc.path_len - 1
+        for e in arc.entries:
+            if share_sound and is_sound_entry(e):
+                continue
+            if spec.base_name in e.path:
+                grown = len(e.path) - base_len
+                path_cap = min(path_cap, cap - grown)
+            if term is None:
+                continue
+            old_term = term.format(name=spec.base_name)
+            for m in re.finditer(re.escape(old_term.encode()), e.data):
+                room = _slack(e.data, _field_end(e.data, m.end(), 1), 1)
+                content_cap = min(content_cap, base_len + room)
+
+    limit = min(content_cap, path_cap)
+    reason = "the archive path field" if path_cap <= content_cap else "string padding"
+    log(f"longest workable name is {limit} characters, bound by {reason}")
+    return limit, reason
 
 
 def find_ui_arc(game_dir: Path) -> Path | None:
@@ -249,13 +402,11 @@ def next_character_index(ini_path: Path) -> int:
 
 
 def build_ini_block(spec: CloneSpec, index: int) -> str:
-    # SOundID is spelled the way the guide spells it. If the Clone Engine parser
-    # turns out to be case sensitive on keys, this is the line to look at first.
     return (
         f"[Character{index}]\n"
         f"CharacterID={spec.new_name}\n"
         f"BaseCharacter={spec.base_name}\n"
-        f"SOundID={spec.sound_id}\n"
+        f"SoundID={spec.sound_id}\n"
         f"NumColors={spec.num_colors}\n"
         f"Child1=\n"
     )
@@ -276,7 +427,10 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
     for suffix, src in sources.items():
         if suffix not in wanted:
             continue
-        if suffix == "sound" and not spec.rename_sound_contents:
+        if suffix == "sound" and spec.rename_sound_contents:
+            report.arcs.append(clone_sound(spec, src, log))
+            continue
+        if suffix == "sound":
             dest = spec.out_dir / SOUND_ARCHIVE / f"{spec.new_name}.arc"
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dest)
@@ -303,7 +457,7 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
     report.files.append(block_file)
 
     if not spec.sound_id:
-        report.warnings.append("SOundID is empty, the clone will be silent until you set it")
+        report.warnings.append("SoundID is empty, the clone will be silent until you set it")
 
     return report
 
