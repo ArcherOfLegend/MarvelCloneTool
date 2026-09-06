@@ -342,6 +342,15 @@ def main():
     except ValueError:
         check("a taken CharacterID is rejected", True)
 
+    print("\nSoundID must be exactly three characters")
+    for sid, want_ok in (("mgl", True), ("sh", False), ("Shadli", False), ("abcd", False)):
+        try:
+            run(CloneSpec(root, Path(tempfile.mkdtemp()), "0033", BASE, "Testy",
+                          ["00"], sound_id=sid), log=lambda _m: None)
+            check(f"SoundID {sid!r} accepted", want_ok)
+        except ValueError:
+            check(f"SoundID {sid!r} rejected", not want_ok)
+
     print("\nUI texture leaf renaming")
     from mvcclone.clone import costume_variants, rename_ui_leaf, sound_archive_dir
 

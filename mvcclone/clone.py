@@ -60,6 +60,8 @@ SOUND_PASSES = [
     ("{base_sid}_", "{new_sid}_"),                              # iro_vo_en, iro_001e, iro_en
 ]
 
+SOUND_ID_LENGTH = 3
+
 SOUND_ID_PATTERN = re.compile(r"[\\/]([a-z0-9]{2,5})_vo_", re.IGNORECASE)
 
 UI_NAME_TEMPLATE = "n_{name}_BM_HQ_NOMIP_typeB_other"
@@ -594,6 +596,13 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
 
     if not spec.sound_id:
         spec.sound_id = spec.base_sound_id
+
+    # Three characters exactly. The game breaks on anything longer.
+    if spec.sound_id and len(spec.sound_id) != SOUND_ID_LENGTH:
+        raise ValueError(
+            f"SoundID {spec.sound_id!r} is {len(spec.sound_id)} characters. "
+            f"It has to be exactly {SOUND_ID_LENGTH}."
+        )
     if spec.sound_id and spec.base_sound_id and spec.sound_id != spec.base_sound_id:
         spec.new_sound_id = spec.sound_id
         log(f"custom sound ID: {spec.base_sound_id} becomes {spec.sound_id}")

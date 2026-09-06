@@ -67,6 +67,7 @@ class Window(QMainWindow):
         self.base_name.textChanged.connect(self.update_length_note)
 
         self.sound_id = QLineEdit()
+        self.sound_id.setMaxLength(3)
         self.sound_id.setPlaceholderText("read from the voice bank")
         self.sound_id.setToolTip(
             "Leave as detected to share the base character's voice. Type a "
