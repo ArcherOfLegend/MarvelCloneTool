@@ -71,8 +71,8 @@ def build_install(root: Path):
     for slot in ("00", "01"):
         make_arc(costume, chr_dir / f"0033_{slot}.arc")
 
-    (root / "sound/se/chr/archive").mkdir(parents=True)
-    make_arc(sound, root / "sound/se/chr/archive/0033_01.arc")
+    (root / "nativePCx64/sound/se/chr/archive").mkdir(parents=True)
+    make_arc(sound, root / "nativePCx64/sound/se/chr/archive/0033_01.arc")
 
     (root / "nativePCx64/ui").mkdir(parents=True, exist_ok=True)
     make_arc(ui, root / "nativePCx64/ui/mnchs_en.arc")
@@ -128,7 +128,7 @@ def main():
               b"ClassIronManThing" in param.entries[0].data)
 
         check(f"{name} sound arc written",
-              (out_dir / "sound/se/chr/archive" / f"{name}.arc").is_file())
+              (out_dir / "nativePCx64/sound/se/chr/archive" / f"{name}.arc").is_file())
         check(f"{name} select screen art written",
               (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_body"
                / f"b_{name}99_BM_HQ_NOMIP.tex").is_file())
