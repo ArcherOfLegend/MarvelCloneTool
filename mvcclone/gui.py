@@ -93,6 +93,11 @@ class Window(QMainWindow):
         self.deep_sound = QCheckBox("Rename inside the voice bank too")
         self.underscores = QCheckBox("Rename underscore-delimited names")
         self.underscores.setChecked(True)
+        self.fan_out = QCheckBox("Duplicate numbered UI art across costumes")
+        self.fan_out.setToolTip(
+            "Off by default. The costume arcs already carry per-costume UI. "
+            "Only turn this on if the game asks for a numbered texture that "
+            "does not exist.")
         self.underscores.setToolTip(
             "Catches IronMan_l0.lmt and n_IronMan_BM_HQ. Never touches move "
             "names like StormSword or GenmuZero.")
@@ -112,6 +117,7 @@ class Window(QMainWindow):
         opts.addWidget(self.want_ui)
         opts.addWidget(self.deep_sound)
         opts.addWidget(self.underscores)
+        opts.addWidget(self.fan_out)
         opts_box = QGroupBox("Extras")
         opts_box.setLayout(opts)
 
@@ -213,6 +219,7 @@ class Window(QMainWindow):
             include_ui=self.want_ui.isChecked(),
             rename_sound_contents=self.deep_sound.isChecked(),
             underscore_names=self.underscores.isChecked(),
+            fan_out_ui=self.fan_out.isChecked(),
         )
 
     def costume_slots(self) -> list[str]:

@@ -52,6 +52,13 @@ def build_install(root: Path):
                  padded(r"\IronMan\shot\x", 40) + b"ClassIronManThing\x00"),
     ]
     costume = [
+        # the per-costume UI textures a real costume arc carries
+        ArcEntry(r"ui\game\ga_hp_f\f_IronMan00_BM_HQ_NOMIP", hash_for_ext("tex"),
+                 0, 0, 0, 0, b"FACE"),
+        ArcEntry(r"ui\game\ga_hp_fb\fb_IronMan00_BM_HQ_NOMIP", hash_for_ext("tex"),
+                 0, 0, 0, 0, b"BORDER"),
+        ArcEntry(r"ui\chs\chs_b1p\chs_body\b_IronMan00_BM_HQ_NOMIP", hash_for_ext("tex"),
+                 0, 0, 0, 0, b"BODY"),
         ArcEntry(r"chr\IronMan\model\1p\Ironman_tex1_BM", hash_for_ext("tex"), 0, 0, 0, 0,
                  b"TEXDATA"),
         ArcEntry(r"chr\IronMan\model\1p\IronMan", hash_for_ext("mrl"), 0, 0, 0, 0,
@@ -141,13 +148,17 @@ def main():
         check(f"{name} select screen name plate written",
               (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_as_n"
                / f"n_{name}_BM_HQ_NOMIP_typeB_other.tex").is_file())
-        for slot in ["00", "01"]:
-            check(f"{name} HP portrait {slot} written",
-                  (out_dir / "nativePCx64/ui/game/ga_hp_f"
-                   / f"f_{name}{slot}_BM_HQ_NOMIP.tex").is_file())
-            check(f"{name} silhouette {slot} written",
-                  (out_dir / "nativePCx64/ui/chs/chs_b1p/chs_body"
-                   / f"b_{name}{slot}_BM_HQ_NOMIP.tex").is_file())
+        # Per-costume UI lives inside the costume arcs, so the check is that
+        # cloning the arc renamed those entries, not that loose files appeared.
+        costume_arc = read_arc(out_dir / "nativePCx64/chr/archive" / f"{name}_00.arc")
+        ui_entries = [e.path for e in costume_arc.entries
+                      if e.path.lower().startswith("ui")]
+        check(f"{name} costume arc carries UI", len(ui_entries) == 3, str(ui_entries))
+        # Not "BASE is absent": IronManJr legitimately contains it.
+        check(f"{name} costume UI renamed",
+              all(name in p for p in ui_entries), str(ui_entries))
+        check(f"{name} HP portrait entry renamed",
+              any(f"f_{name}00_" in p for p in ui_entries), str(ui_entries))
         check(f"{name} ini block numbered past the existing one",
               "[Character2]" in report.ini_block)
         check(f"{name} ini uses SoundID", "SoundID=iro" in report.ini_block,
@@ -157,12 +168,12 @@ def main():
     from mvcclone.clone import costume_variants, rename_ui_leaf, sound_archive_dir
 
     slots = [f"{i:02d}" for i in range(8)]
-    check("b_Ryu99 fans out to every costume plus 99",
+    check("numbered UI stays single by default",
           costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", slots)
+          == ["b_RyA99_BM_HQ_NOMIP"])
+    check("fan out is available when asked for",
+          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", slots, True)
           == [f"b_RyA{s}_BM_HQ_NOMIP" for s in slots] + ["b_RyA99_BM_HQ_NOMIP"])
-    check("f_Ryu00 fans out to every costume",
-          costume_variants("f_Ryu00_BM_HQ_NOMIP", "Ryu", "RyA", slots)
-          == [f"f_RyA{s}_BM_HQ_NOMIP" for s in slots])
     check("unnumbered name plate stays single",
           costume_variants("n_Ryu_BM_HQ_NOMIP_typeB_other", "Ryu", "RyA", slots)
           == ["n_RyA_BM_HQ_NOMIP_typeB_other"])

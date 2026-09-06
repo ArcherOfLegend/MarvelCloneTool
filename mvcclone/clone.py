@@ -91,6 +91,7 @@ class CloneSpec:
     include_sound: bool = True
     include_ui: bool = True
     rename_sound_contents: bool = False
+    fan_out_ui: bool = False        # duplicate a numbered UI texture across costumes
     underscore_names: bool = True   # also rename IronMan_l0, n_IronMan_BM_HQ
 
     def __post_init__(self):
@@ -209,8 +210,20 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
     path_renames = 0
     cap = arc.path_len - 1
     for e in targets:
-        renamed = rename_components(e.path, spec.base_name, spec.new_name,
-                                    underscores=spec.underscore_names)
+        # Character arcs carry their own UI textures, six per costume, named
+        # f_IronMan00_BM_HQ_NOMIP and friends. Those glue the costume number
+        # straight onto the name, which the asset rule refuses on purpose so it
+        # cannot eat move names like StormSword. Under ui\ there are no move
+        # names, so the UI rule applies there and the digit counts as a
+        # delimiter. Miss this and the clone's HP portrait still points at the
+        # base character, which is a fatal error the moment a round loads.
+        if re.split(r"[\\/]", e.path)[0].lower() == "ui":
+            parts = re.split(r"([\\/])", e.path)
+            parts[-1] = rename_ui_leaf(parts[-1], spec.base_name, spec.new_name)
+            renamed = "".join(parts)
+        else:
+            renamed = rename_components(e.path, spec.base_name, spec.new_name,
+                                        underscores=spec.underscore_names)
         if renamed == e.path:
             continue
         if len(renamed.encode("ascii", "replace")) > cap:
@@ -457,17 +470,24 @@ def rename_ui_leaf(leaf: str, base: str, new: str) -> str:
 UI_SLOT_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(\d+)(?=_|$)"
 
 
-def costume_variants(leaf: str, base: str, new: str, costumes: list[str]) -> list[str]:
+def costume_variants(leaf: str, base: str, new: str, costumes: list[str],
+                     fan_out: bool = False) -> list[str]:
     """
-    Renamed UI leaf names, fanned out across costume slots where relevant.
+    Renamed UI leaf names, optionally fanned out across costume slots.
 
-    Some UI textures carry a slot number glued to the name. The base game may
-    ship only one of them, b_Ryu99, but the engine asks for a file per costume
-    the moment you hover a colour, and a miss is a fatal error rather than a
-    missing image. So a numbered leaf is emitted once per costume plus once at
-    its original number, and an unnumbered leaf is emitted as-is.
+    Fanning out is off by default and should stay that way. Each costume arc
+    already ships its own per-costume UI set, six textures covering the HP
+    portrait, its border, both damaged variants, the results screen and the
+    select body, all numbered to match. Cloning the arc renames those, so the
+    numbered files exist without copying anything loose.
+
+    Duplicating a loose b_Ryu99 across 00 to 07 would shadow that per-costume
+    art with a single image, so it is only worth turning on if a character
+    turns out to be missing a numbered texture the engine still asks for.
     """
     renamed = rename_ui_leaf(leaf, base, new)
+    if not fan_out:
+        return [renamed]
     match = re.search(UI_SLOT_RE_TEMPLATE.format(name=re.escape(base)), leaf)
     if not match:
         return [renamed]
@@ -551,7 +571,8 @@ def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]
         if arc_file is None:
             src = spec.game_dir / rel / f"{leaf}.tex"
             for new_leaf in costume_variants(
-                    leaf, spec.base_name, spec.new_name, spec.costumes):
+                    leaf, spec.base_name, spec.new_name, spec.costumes,
+                    spec.fan_out_ui):
                 dest = spec.out_dir / rel / f"{new_leaf}.tex"
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dest)
@@ -568,7 +589,8 @@ def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]
                 warnings.append(f"{leaf} vanished from {arc_file.name}")
                 continue
             for new_leaf in costume_variants(
-                    leaf, spec.base_name, spec.new_name, spec.costumes):
+                    leaf, spec.base_name, spec.new_name, spec.costumes,
+                    spec.fan_out_ui):
                 dest = spec.out_dir / rel / f"{new_leaf}.tex"
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(entry.data)
