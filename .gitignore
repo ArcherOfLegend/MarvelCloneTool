@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# tool output
+*.roundtrip.arc
+mvcclone_out/
+out/
+
+# never commit game assets
+*.arc
+*.tex
+*.dds
+*.lmt
+*.mod
+characters.ini
+
+.vscode/
+.idea/
+.DS_Store

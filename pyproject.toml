@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mvcclone"
+version = "0.1.0"
+description = "Clone UMvC3 characters into Clone Engine slots"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ArcherOfLegend" }]
+dependencies = ["PyQt6>=6.5"]
+
+[project.urls]
+Homepage = "https://github.com/ArcherOfLegend/MarvelCloneTool"
+Issues = "https://github.com/ArcherOfLegend/MarvelCloneTool/issues"
+
+[project.scripts]
+mvcclone = "mvcclone.gui:main"
+
+[tool.setuptools]
+packages = ["mvcclone"]

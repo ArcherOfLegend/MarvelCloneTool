@@ -1,0 +1,158 @@
+"""
+Binary name replacement that does not move any bytes.
+
+The guide's method is 010 Editor's Replace in Files with match-case on, which is
+a straight byte swap and therefore pins you to an identical character count.
+That restriction is not actually about the file format, it is about the tool.
+
+Most of these strings live in fixed-size null-padded fields. If a field has
+trailing nulls you can write a longer name into it and eat the padding, and a
+shorter name just gets more padding. Either way the field occupies the same
+number of bytes, so every offset downstream of it is untouched and nothing needs
+rebuilding.
+
+What you cannot do is grow a name into a field with no slack. That case gets
+reported rather than silently corrupting the file.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Replacement:
+    offset: int
+    encoding: str
+    before: str
+    after: str
+    padding_used: int   # negative means padding was returned to the field
+
+
+@dataclass
+class Refusal:
+    offset: int
+    encoding: str
+    reason: str
+    context: str
+
+
+@dataclass
+class ReplaceResult:
+    data: bytes
+    applied: list[Replacement] = field(default_factory=list)
+    refused: list[Refusal] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.refused
+
+    @property
+    def count(self) -> int:
+        return len(self.applied)
+
+
+def _printable(chunk: bytes) -> str:
+    return "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+
+
+def _field_end(data: bytes, start: int, step: int) -> int:
+    """Offset of the null terminator that closes the string containing `start`."""
+    i = start
+    unit = b"\x00" * step
+    while i + step <= len(data):
+        if data[i:i + step] == unit:
+            return i
+        i += step
+    return len(data)
+
+
+def _slack(data: bytes, term: int, step: int) -> int:
+    """Bytes of contiguous null padding starting at the terminator."""
+    n = 0
+    i = term
+    unit = b"\x00" * step
+    while i + step <= len(data) and data[i:i + step] == unit:
+        n += step
+        i += step
+    return n
+
+
+def replace(
+    data: bytes,
+    old: str,
+    new: str,
+    *,
+    encoding: str = "ascii",
+    match_case: bool = True,
+) -> ReplaceResult:
+    """
+    Swap `old` for `new` throughout `data` without changing its length.
+
+    `old` and `new` are the raw search terms. The caller is responsible for any
+    leading or trailing backslash, because which delimiters you include is the
+    whole difference between the cmn pass and the param pass.
+    """
+    step = 1 if encoding == "ascii" else 2
+    codec = "ascii" if step == 1 else "utf-16le"
+    old_b = old.encode(codec)
+    new_b = new.encode(codec)
+    delta = len(new_b) - len(old_b)
+
+    flags = 0 if match_case else re.IGNORECASE
+    pattern = re.compile(re.escape(old_b), flags)
+
+    if delta == 0:
+        # A lambda, not the literal bytes. These terms are full of backslashes
+        # and re.sub would try to read them as escape sequences.
+        out = pattern.sub(lambda _m: new_b, data)
+        applied = [
+            Replacement(m.start(), encoding, old, new, 0)
+            for m in pattern.finditer(data)
+        ]
+        return ReplaceResult(out, applied, [])
+
+    buf = bytearray(data)
+    result = ReplaceResult(data)
+    applied: list[Replacement] = []
+    refused: list[Refusal] = []
+
+    # Walk backwards so earlier offsets stay valid while we rewrite.
+    matches = list(pattern.finditer(data))
+    for m in reversed(matches):
+        s, e = m.start(), m.end()
+        term = _field_end(buf, e, step)
+        room = _slack(buf, term, step)
+        tail = bytes(buf[e:term])
+
+        if delta > room:
+            refused.append(Refusal(
+                s, encoding,
+                f"needs {delta} more bytes, field has {room} of padding",
+                _printable(bytes(buf[max(0, s - 16):term + 16])),
+            ))
+            continue
+
+        rebuilt = new_b + tail + b"\x00" * (room - delta)
+        buf[s:term + room] = rebuilt
+        applied.append(Replacement(s, encoding, old, new, delta))
+
+    applied.reverse()
+    result.data = bytes(buf)
+    result.applied = applied
+    result.refused = refused
+    if len(result.data) != len(data):
+        raise AssertionError(
+            f"replacement changed file length {len(data)} -> {len(result.data)}, "
+            "this is a bug and the output must not be used"
+        )
+    return result
+
+
+def rename_path(path: str, old: str, new: str, match_case: bool = True) -> str:
+    """Rename inside an ARC internal path. No delimiters, matching the guide's
+    'Find and Replace in All File Names' step."""
+    if match_case:
+        return path.replace(old, new)
+    return re.sub(re.escape(old), new, path, flags=re.IGNORECASE)
