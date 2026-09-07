@@ -60,6 +60,64 @@ SOUND_PASSES = [
     ("{base_sid}_", "{new_sid}_"),                              # iro_vo_en, iro_001e, iro_en
 ]
 
+# The base roster. Display names only; the archives are found by the numeric
+# ID and the codename is still read out of the archive itself, so a wrong
+# label here cannot affect a clone.
+ROSTER = [
+    ("0001", "Ryu"),
+    ("0002", "Chun-Li"),
+    ("0003", "Gouki (Akuma)"),
+    ("0004", "Chris"),
+    ("0005", "Wesker"),
+    ("0006", "Viewtiful Joe"),
+    ("0007", "Dante"),
+    ("0008", "Trish"),
+    ("0009", "Frank West"),
+    ("0010", "Spencer"),
+    ("0011", "Sir Arthur"),
+    ("0012", "Amaterasu"),
+    ("0013", "Zero"),
+    ("0014", "Tron Bonne"),
+    ("0015", "Morrigan"),
+    ("0016", "Lei-Lei (Hsien-Ko)"),
+    ("0017", "Felicia"),
+    ("0018", "Crimson Viper"),
+    ("0019", "Haggar"),
+    ("0020", "Jill"),
+    ("0021", "Strider Hiryu"),
+    ("0022", "Vergil"),
+    ("0023", "Naruhodo (Phoenix Wright)"),
+    ("0024", "Red Aremer (Firebrand)"),
+    ("0025", "Nemesis"),
+    ("0026", "Spider Man"),
+    ("0027", "Captain America"),
+    ("0028", "Wolverine"),
+    ("0029", "Magneto"),
+    ("0030", "Hulk"),
+    ("0031", "She Hulk"),
+    ("0032", "Taskmaster"),
+    ("0033", "Iron Man"),
+    ("0034", "Thor"),
+    ("0035", "Doctor Doom"),
+    ("0036", "Phoenix"),
+    ("0037", "Shuma Gorath"),
+    ("0038", "Modok"),
+    ("0039", "Dormammu"),
+    ("0040", "Deadpool"),
+    ("0041", "Storm"),
+    ("0042", "Super Skrull"),
+    ("0043", "Sentinel"),
+    ("0044", "X-23"),
+    ("0045", "Nova"),
+    ("0046", "Rocket Racoon"),
+    ("0047", "Ghost Rider"),
+    ("0048", "Iron Fist"),
+    ("0049", "Dr Strange"),
+    ("0050", "Hawkeye"),
+    ("0051", "Galactus"),
+]
+
+
 SOUND_ID_LENGTH = 3
 
 SOUND_ID_PATTERN = re.compile(r"[\\/]([a-z0-9]{2,5})_vo_", re.IGNORECASE)
@@ -352,10 +410,17 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
     reason = "nothing found"
 
     for suffix, src in sources.items():
+        # The voice archive counts. Its srqr is not a rebuildable bank and has
+        # the tightest padding of anything the character owns, so skipping it
+        # produces a limit the clone then fails to meet.
         arc = read_arc(src)
         term = PASSES[kind_for_suffix(suffix)] or "\\{name}"
         cap = arc.path_len - 1
         for e in arc.entries:
+            # Count every path the rename would touch, not just the ones where
+            # the name is a standalone folder. IronMan_l0 and n_IronMan_BM_HQ
+            # grow too, and a path can contain the name more than once, which
+            # multiplies the growth.
             probe = spec.base_name + "\x01"
             if re.split(r"[\\/]", e.path)[0].lower() == "ui":
                 parts = re.split(r"([\\/])", e.path)
@@ -587,6 +652,33 @@ def build_ini_block(spec: CloneSpec, index: int) -> str:
     )
 
 
+def verify_output(report: CloneReport, log=print) -> list[str]:
+    problems = []
+    for result in report.arcs:
+        if not result.dest or not result.dest.is_file():
+            continue
+
+        name = result.dest.name
+        if len(name.encode("ascii", "replace")) > 0x3F:
+            problems.append(f"{name}: filename is {len(name)} bytes, the buffer holds 63")
+
+        arc = read_arc(result.dest)
+        cap = arc.path_len - 1
+        for e in arc.entries:
+            n = len(e.path.encode("ascii", "replace"))
+            if n > cap:
+                problems.append(f"{name}: internal path is {n} bytes, the field holds {cap}"
+                                f"  {e.path}")
+
+    for path in report.files:
+        if path.suffix.lower() == ".tex" and len(path.name) > 0x3F:
+            problems.append(f"{path.name}: filename is {len(path.name)} bytes")
+
+    for p in problems:
+        log(f"OVERRUN  {p}")
+    return problems
+
+
 def run(spec: CloneSpec, log=print) -> CloneReport:
     report = CloneReport()
     sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
@@ -677,6 +769,12 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
 
     if not spec.sound_id:
         report.warnings.append("SoundID is empty.")
+
+    overruns = verify_output(report, log)
+    if overruns:
+        report.warnings.append(
+            f"{len(overruns)} strings overran their 0x40 buffer. This clone will "
+            f"not load correctly. Use a shorter name.")
 
     return report
 

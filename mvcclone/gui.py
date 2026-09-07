@@ -4,19 +4,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .arc import read_arc, unpack, verify_roundtrip
+from .arc import read_arc
 from .clone import (
-    CloneSpec, detect_base_name, detect_sound_id, embedded_name_report,
-    find_sources, install, max_name_length, run,
+    ROSTER, CloneSpec, detect_base_name, detect_sound_id, find_sources, install,
+    max_name_length, run,
 )
-from .scan import Room, max_safe_length, scan_arc_paths, scan_tree, summarise
 
 
 class Job(QThread):
@@ -49,13 +49,23 @@ class Window(QMainWindow):
         self.game_dir.setPlaceholderText(r"E:\ULTIMATE MARVEL VS. CAPCOM 3")
         pick_game = QPushButton("Browse")
         pick_game.clicked.connect(lambda: self._pick_dir(self.game_dir, "Game install"))
+        self.game_dir.editingFinished.connect(self.detect_name)
 
         self.out_dir = QLineEdit(str(Path(tempfile.gettempdir()) / "mvcclone_out"))
         pick_out = QPushButton("Browse")
         pick_out.clicked.connect(lambda: self._pick_dir(self.out_dir, "Staging folder"))
 
-        self.char_id = QLineEdit()
-        self.char_id.setPlaceholderText("0033")
+        self.char_id = QComboBox()
+        self.char_id.setEditable(True)
+        self.char_id.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        for cid, label in ROSTER:
+            self.char_id.addItem(f"{cid} - {label}", cid)
+        self.char_id.setCurrentIndex(-1)
+        self.char_id.lineEdit().setPlaceholderText("Type a character ID or pick one from the list")
+        self.char_id.currentIndexChanged.connect(self.detect_name)
+        # Reading the archives is fast and has no side effects, so there is no
+        # reason to make it a button press. Fires when the field settles.
+        self.char_id.lineEdit().editingFinished.connect(self.detect_name)
         detect = QPushButton("Read name")
         detect.clicked.connect(self.detect_name)
 
@@ -65,9 +75,12 @@ class Window(QMainWindow):
         self.new_name.setPlaceholderText("PwrSuit")
         self.new_name.textChanged.connect(self.update_length_note)
         self.base_name.textChanged.connect(self.update_length_note)
+        self.new_name.textChanged.connect(self.refresh_buttons)
+        self.base_name.textChanged.connect(self.refresh_buttons)
 
         self.sound_id = QLineEdit()
         self.sound_id.setMaxLength(3)
+        self.sound_id.textChanged.connect(self.refresh_buttons)
         self.sound_id.setPlaceholderText("read from the voice bank")
         self.sound_id.setToolTip(
             "Leave as detected to share the base character's voice. Type a "
@@ -78,6 +91,7 @@ class Window(QMainWindow):
         self.costumes.setRange(1, 16)
         self.costumes.setValue(8)
         self.costumes.valueChanged.connect(self.update_colour_count)
+        self.costumes.valueChanged.connect(self.refresh_buttons)
         self.colour_count = QLabel()
         self.want_sound = QCheckBox("Clone the voice bank")
         self.want_sound.setChecked(True)
@@ -93,7 +107,7 @@ class Window(QMainWindow):
 
         form = QFormLayout()
         form.addRow("Game install", self._row(self.game_dir, pick_game))
-        form.addRow("Staging folder", self._row(self.out_dir, pick_out))
+        form.addRow("Cloning folder", self._row(self.out_dir, pick_out))
         form.addRow("Character ID", self._row(self.char_id, detect))
         form.addRow("Base codename", self.base_name)
         form.addRow("Clone name", self.new_name)
@@ -109,39 +123,33 @@ class Window(QMainWindow):
         opts_box = QGroupBox("Extras")
         opts_box.setLayout(opts)
 
-        self.survey_btn = QPushButton("Survey the name")
-        self.survey_btn.clicked.connect(self.survey)
-        self.stage_btn = QPushButton("Stage the clone")
+        self.stage_btn = QPushButton("Create clone")
         self.stage_btn.clicked.connect(self.stage)
+        self.stage_btn.setToolTip("Builds everything into the cloning folder. "
+                                  "Nothing touches the game yet.")
         self.install_btn = QPushButton("Install into the game")
         self.install_btn.setEnabled(False)
         self.install_btn.clicked.connect(self.install_clone)
+        self.install_btn.setToolTip("Copies the staged files over and appends "
+                                    "characters.ini, backing it up first.")
+
+        self.open_btn = QPushButton("Open cloning folder")
+        self.open_btn.clicked.connect(self.open_out_dir)
 
         buttons = QHBoxLayout()
-        buttons.addWidget(self.survey_btn)
         buttons.addWidget(self.stage_btn)
+        buttons.addWidget(self.open_btn)
         buttons.addWidget(self.install_btn)
         buttons.addStretch(1)
 
         self.note = QLabel(
-            "Point at your install, give a character ID, read the name off the archive."
+            "Point at your install and type a character ID."
         )
         self.note.setWordWrap(True)
-
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(
-            ["File", "Offset", "Encoding", "Room", "Slack", "Context"]
-        )
-        self.table.setSortingEnabled(True)
 
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumBlockCount(2000)
-
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(self.table)
-        split.addWidget(self.console)
-        split.setSizes([380, 240])
 
         left = QVBoxLayout()
         left.addLayout(form)
@@ -155,12 +163,13 @@ class Window(QMainWindow):
 
         body = QHBoxLayout()
         body.addWidget(left_widget)
-        body.addWidget(split, 1)
+        body.addWidget(self.console, 1)
 
         holder = QWidget()
         holder.setLayout(body)
         self.setCentralWidget(holder)
         self.update_colour_count()
+        self.refresh_buttons()
 
     # helpers
 
@@ -172,13 +181,18 @@ class Window(QMainWindow):
         lay.addWidget(button)
         return w
 
+    def open_out_dir(self):
+        target = Path(self.out_dir.text().strip())
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
     def _pick_dir(self, target: QLineEdit, caption: str):
         chosen = QFileDialog.getExistingDirectory(self, caption, target.text() or "")
         if chosen:
             target.setText(chosen)
 
     def _busy(self, on: bool):
-        for b in (self.survey_btn, self.stage_btn):
+        for b in (self.stage_btn,):
             b.setEnabled(not on)
 
     def _start(self, fn, on_done):
@@ -198,7 +212,7 @@ class Window(QMainWindow):
         return CloneSpec(
             game_dir=Path(self.game_dir.text().strip()),
             out_dir=Path(self.out_dir.text().strip()),
-            char_id=self.char_id.text().strip(),
+            char_id=self.char_id_value(),
             base_name=self.base_name.text().strip(),
             new_name=self.new_name.text().strip(),
             costumes=self.costume_slots(),
@@ -215,6 +229,59 @@ class Window(QMainWindow):
     def update_colour_count(self):
         slots = self.costume_slots()
         self.colour_count.setText(f"NumColors={len(slots)}, {slots[0]} to {slots[-1]}")
+
+    def normalise_char_id(self):
+        """Show the full '0033 - Iron Man' label whatever was typed."""
+        cid = self.char_id_value()
+        for index in range(self.char_id.count()):
+            if self.char_id.itemData(index) == cid:
+                if self.char_id.currentText() != self.char_id.itemText(index):
+                    self.char_id.setCurrentText(self.char_id.itemText(index))
+                return
+        # Not a base character. Keep the padded number so it still matches the
+        # archive filenames, since clones and mods have IDs of their own.
+        if cid and self.char_id.currentText() != cid:
+            self.char_id.setCurrentText(cid)
+
+    def char_id_value(self) -> str:
+        token = self.char_id.currentText().strip().split(" ")[0]
+        if token.isdigit():
+            return token.zfill(4)
+        return token
+
+    def blocker(self) -> str:
+        """Why the clone cannot be staged yet, or empty if it can."""
+        if not Path(self.game_dir.text().strip() or ".").is_dir():
+            return "Point at your game install."
+        if not self.char_id_value():
+            return "Type a character ID or pick one from the drop-down."
+        if not self.base_name.text().strip():
+            return "No codename yet. Check the ID matches archives in chr/archive."
+        if not self.new_name.text().strip():
+            return "Give the clone a name."
+        sid = self.sound_id.text().strip()
+        if sid and len(sid) != 3:
+            return f"Sound ID is {len(sid)} characters, it has to be 3."
+        if self.name_limit and len(self.new_name.text().strip()) > self.name_limit:
+            return f"Clone name is longer than {self.name_limit} characters."
+        return ""
+
+    def refresh_buttons(self):
+        # Any edit makes a previous staging run stale, so installing it would
+        # copy files that no longer match what is on screen.
+        if self.report is not None and self.spec is not None:
+            if (self.spec.new_name != self.new_name.text().strip()
+                    or self.spec.sound_id != self.sound_id.text().strip()
+                    or self.spec.base_name != self.base_name.text().strip()):
+                self.report = None
+                self.install_btn.setEnabled(False)
+
+        why = self.blocker()
+        self.stage_btn.setEnabled(not why)
+        if why:
+            self.note.setText(why)
+        else:
+            self.update_length_note()
 
     def update_length_note(self):
         base, new = self.base_name.text().strip(), self.new_name.text().strip()
@@ -240,14 +307,30 @@ class Window(QMainWindow):
     # actions
 
     def detect_name(self):
+        self.normalise_char_id()
+        if not self.char_id_value():
+            self.refresh_buttons()
+            return
+
+        # Anything on screen belongs to the previous character.
+        self.base_name.clear()
+        self.name_limit = 0
+        self.new_name.setMaxLength(32767)
+        self.install_btn.setEnabled(False)
+        self.report = None
+
         spec = self.build_spec()
-        sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
+        try:
+            sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
+        except Exception as exc:
+            self.console.appendPlainText(f"could not read the install: {exc}")
+            self.refresh_buttons()
+            return
         pick = sources.get("cmn") or next(iter(sources.values()), None)
         if pick is None:
-            QMessageBox.warning(
-                self, "Nothing found",
-                f"No archives for {spec.char_id} under that install."
-            )
+            self.console.appendPlainText(
+                f"no archives for {spec.char_id} under that install")
+            self.refresh_buttons()
             return
         numbered = sorted(k for k in sources if k.isdigit())
         if numbered:
@@ -267,7 +350,8 @@ class Window(QMainWindow):
             self.base_name.setText(name)
             self.console.appendPlainText(f"{pick.name} says the character ID is {name}")
         else:
-            self.console.appendPlainText(f"Could not read a character ID out of {pick.name}")
+            self.console.appendPlainText(f"could not read a codename out of {pick.name}")
+            self.refresh_buttons()
             return
 
         # Only now, with the codename known. Measuring against an empty base name
@@ -287,84 +371,13 @@ class Window(QMainWindow):
         else:
             self.console.appendPlainText(
                 "name limit came out as zero, which is a bug. Leaving the field open.")
-
-    def survey(self):
-        spec = self.build_spec()
-        if not spec.base_name:
-            QMessageBox.warning(self, "No character ID", "Read the character ID off the archive first.")
-            return
-
-        def work(log):
-            sources = find_sources(spec.game_dir, spec.char_id, spec.sound_lang)
-            log(f"{len(sources)} archives: {', '.join(sorted(sources))}")
-            max_name_length(spec, log)
-            report = embedded_name_report(spec)
-            if report:
-                log(f"\n{len(report)} names embedded rather than standalone:")
-                for line in report:
-                    log(f"   {line}")
-                log("")
-            all_hits = []
-            for suffix, src in sorted(sources.items()):
-                ok, detail = verify_roundtrip(src)
-                log(f"{src.name} round trip: {detail}")
-                if not ok:
-                    raise RuntimeError(f"{src.name} does not survive a repack. {detail}")
-                arc = read_arc(src)
-                out = Path(tempfile.mkdtemp(prefix=f"mvc_{suffix}_"))
-                unpack(arc, out)
-                hits = scan_arc_paths(arc, spec.base_name) + scan_tree(out, spec.base_name)
-                log(f"{src.name}: {len(hits)} references")
-                all_hits.extend(hits)
-            return all_hits
-
-        self.console.clear()
-        self.table.setRowCount(0)
-        self._start(work, self.show_survey)
-
-    def show_survey(self, hits):
-        base = self.base_name.text().strip()
-        cap = max_safe_length(hits, base)
-        tight = sum(1 for h in hits if h.room is Room.TIGHT)
-
-        if tight:
-            self.note.setText(
-                f"{len(hits)} references, {tight} with no padding behind them. "
-                f"Those pin you to {len(base)} characters unless a format handler "
-                f"rebuilds them."
-            )
-        else:
-            self.note.setText(
-                f"{len(hits)} references, all padded. Names up to {cap} characters fit."
-            )
-
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(hits))
-        for row, h in enumerate(hits):
-            cells = [h.file, "" if h.offset < 0 else f"0x{h.offset:X}", h.encoding,
-                     h.room.value, str(h.slack), h.context]
-            for col, text in enumerate(cells):
-                self.table.setItem(row, col, QTableWidgetItem(text))
-        self.table.setSortingEnabled(True)
-        self.table.resizeColumnsToContents()
-
-        self.console.appendPlainText("")
-        for ext, info in sorted(summarise(hits).items()):
-            self.console.appendPlainText(
-                f"{ext or '(none)':12} {info['count']:5} hits  {info['tight']:5} tight  "
-                f"{len(info['files'])} files"
-            )
+        self.refresh_buttons()
 
     def stage(self):
         spec = self.build_spec()
-        if not (spec.base_name and spec.new_name):
-            QMessageBox.warning(self, "Missing names", "Both names are needed.")
-            return
-        if self.name_limit and len(spec.new_name) > self.name_limit:
-            QMessageBox.warning(
-                self, "Name too long",
-                f"{spec.new_name!r} is {len(spec.new_name)} characters. "
-                f"{spec.base_name} allows {self.name_limit}.")
+        why = self.blocker()
+        if why:
+            self.note.setText(why)
             return
         self.spec = spec
         self.console.clear()
