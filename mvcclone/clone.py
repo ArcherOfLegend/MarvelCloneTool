@@ -142,6 +142,7 @@ class CloneSpec:
     include_sound: bool = True
     include_ui: bool = True
     fan_out_ui: bool = False        # duplicate a numbered UI texture across costumes
+    ui_255: bool = False            # also emit a 255 copy of every 99 texture
     underscore_names: bool = True   # also rename IronMan_l0, n_IronMan_BM_HQ
 
     def __post_init__(self):
@@ -513,23 +514,28 @@ UI_SLOT_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(\d+)(?=_|$)"
 
 
 def costume_variants(leaf: str, base: str, new: str, costumes: list[str],
-                     fan_out: bool = False) -> list[str]:
+                     fan_out: bool = False, also_255: bool = False) -> list[str]:
     renamed = rename_ui_leaf(leaf, base, new)
-    if not fan_out:
-        return [renamed]
     match = re.search(UI_SLOT_RE_TEMPLATE.format(name=re.escape(base)), leaf)
     if not match:
         return [renamed]
 
     original = match.group(1)
     width = len(original)
-    slots = list(dict.fromkeys(list(costumes) + [original]))
+
+    slots: list[str] = []
+    if fan_out:
+        slots += list(costumes)
+    slots.append(original)
+    if also_255 and original == "99":
+        slots.append("255")
+
     out = []
-    for slot in slots:
-        slot = slot.zfill(width)
+    for slot in dict.fromkeys(slots):
+        padded_slot = slot if slot == "255" else slot.zfill(width)
         out.append(re.sub(
             UI_SLOT_RE_TEMPLATE.format(name=re.escape(new)),
-            new + slot, renamed, count=1))
+            new + padded_slot, renamed, count=1))
     return list(dict.fromkeys(out))
 
 
@@ -589,7 +595,7 @@ def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]
             src = spec.game_dir / rel / f"{leaf}.tex"
             for new_leaf in costume_variants(
                     leaf, spec.base_name, spec.new_name, spec.costumes,
-                    spec.fan_out_ui):
+                    spec.fan_out_ui, spec.ui_255):
                 dest = spec.out_dir / rel / f"{new_leaf}.tex"
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(src, dest)
@@ -607,7 +613,7 @@ def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]
                 continue
             for new_leaf in costume_variants(
                     leaf, spec.base_name, spec.new_name, spec.costumes,
-                    spec.fan_out_ui):
+                    spec.fan_out_ui, spec.ui_255):
                 dest = spec.out_dir / rel / f"{new_leaf}.tex"
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(entry.data)

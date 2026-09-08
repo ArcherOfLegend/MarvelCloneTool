@@ -342,6 +342,29 @@ def main():
     except ValueError:
         check("a taken CharacterID is rejected", True)
 
+    print("\nthe 255 counterpart of a 99 texture")
+    from mvcclone.clone import costume_variants
+    ui_cos = [f"{i:02d}" for i in range(4)]
+    check("99 alone by default",
+          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos)
+          == ["b_RyA99_BM_HQ_NOMIP"])
+    check("99 plus 255 when asked",
+          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, False, True)
+          == ["b_RyA99_BM_HQ_NOMIP", "b_RyA255_BM_HQ_NOMIP"])
+    check("255 is not padded to the width of 99",
+          "b_RyA255_BM_HQ_NOMIP" in
+          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, False, True))
+    check("a costume texture gets no 255",
+          costume_variants("f_Ryu00_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, False, True)
+          == ["f_RyA00_BM_HQ_NOMIP"])
+    check("an unnumbered texture gets no 255",
+          costume_variants("n_Ryu_BM_HQ_typeB", "Ryu", "RyA", ui_cos, False, True)
+          == ["n_RyA_BM_HQ_typeB"])
+    check("255 composes with the fan out",
+          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, True, True)
+          == [f"b_RyA{s}_BM_HQ_NOMIP" for s in ui_cos]
+          + ["b_RyA99_BM_HQ_NOMIP", "b_RyA255_BM_HQ_NOMIP"])
+
     print("\nSoundID must be exactly three characters")
     for sid, want_ok in (("mgl", True), ("sh", False), ("Shadli", False), ("abcd", False)):
         try:

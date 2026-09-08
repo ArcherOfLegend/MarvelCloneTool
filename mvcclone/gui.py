@@ -99,6 +99,7 @@ class Window(QMainWindow):
         self.want_ui.setChecked(True)
         self.underscores = QCheckBox("Rename underscore-delimited names")
         self.underscores.setChecked(True)
+        self.ui_255 = QCheckBox("Also write a 255 copy of every 99 UI texture")
         self.fan_out = QCheckBox("Duplicate numbered UI art across costumes")
         self.fan_out.setToolTip(
             "Off by default. The costume arcs already carry per-costume UI. "
@@ -120,6 +121,7 @@ class Window(QMainWindow):
         opts.addWidget(self.want_ui)
         opts.addWidget(self.underscores)
         opts.addWidget(self.fan_out)
+        opts.addWidget(self.ui_255)
         opts_box = QGroupBox("Extras")
         opts_box.setLayout(opts)
 
@@ -221,6 +223,7 @@ class Window(QMainWindow):
             include_ui=self.want_ui.isChecked(),
             underscore_names=self.underscores.isChecked(),
             fan_out_ui=self.fan_out.isChecked(),
+            ui_255=self.ui_255.isChecked(),
         )
 
     def costume_slots(self) -> list[str]:
