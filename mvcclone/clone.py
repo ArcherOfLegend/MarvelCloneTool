@@ -636,6 +636,32 @@ def next_character_index(ini_path: Path) -> int:
     return max(used) + 1 if used else 1
 
 
+def find_characters_ini(game_dir: Path) -> Path:
+    """Characters.ini lives in the game root, not nativePCx64."""
+    game_dir = Path(game_dir)
+    for candidate in ("Characters.ini", "characters.ini",
+                      "nativePCx64/Characters.ini", "nativePCx64/characters.ini"):
+        path = game_dir / candidate
+        if path.is_file():
+            return path
+    return game_dir / "Characters.ini"
+
+
+def character_list(ini_path: Path) -> list[tuple[int, str, str]]:
+    """(block number, CharacterID, BaseCharacter) for every entry."""
+    if not Path(ini_path).is_file():
+        return []
+    text = Path(ini_path).read_text(errors="replace")
+    out = []
+    for index, body in re.findall(
+            r"\[Character(\d+)\](.*?)(?=\[Character\d+\]|\Z)", text, re.S):
+        fields = dict(re.findall(r"^\s*(\w+)\s*=\s*(.*?)\s*$", body, re.M))
+        cid = fields.get("CharacterID", "")
+        if cid:
+            out.append((int(index), cid, fields.get("BaseCharacter", "")))
+    return sorted(out)
+
+
 def existing_character_ids(ini_path: Path) -> dict[str, int]:
     """CharacterID -> block number, for every entry already in the ini."""
     if not ini_path.is_file():
@@ -767,7 +793,7 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
         report.files.extend(written)
         report.warnings.extend(warns)
 
-    ini_path = spec.game_dir / "nativePCx64" / "characters.ini"
+    ini_path = find_characters_ini(spec.game_dir)
     # A duplicate CharacterID silently shadows an installed clone. With dozens
     # of entries in a real ini that is easy to do and hard to spot afterwards.
     taken = existing_character_ids(ini_path)
@@ -809,7 +835,7 @@ def install(spec: CloneSpec, report: CloneReport, log=print) -> list[Path]:
             copied.append(dest)
             log(f"installed {rel}")
 
-    ini = spec.game_dir / "nativePCx64" / "characters.ini"
+    ini = find_characters_ini(spec.game_dir)
     if ini.is_file():
         backup = ini.with_suffix(".ini.bak")
         if not backup.exists():

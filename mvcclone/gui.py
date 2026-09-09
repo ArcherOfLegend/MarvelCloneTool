@@ -251,9 +251,13 @@ class Window(QMainWindow):
         csa_browse = QPushButton("Browse")
         csa_browse.clicked.connect(lambda: self._pick_file(self.csa_src, "*.csa"))
 
-        self.assist_slot = QSpinBox()
-        self.assist_slot.setRange(1, 512)
-        self.assist_slot.valueChanged.connect(self.load_assist_slot)
+        self.assist_list = QListWidget()
+        self.assist_list.setAlternatingRowColors(True)
+        self.assist_list.currentRowChanged.connect(self.load_assist_slot)
+
+        self.assist_filter = QLineEdit()
+        self.assist_filter.setPlaceholderText("Filter by assist name")
+        self.assist_filter.textChanged.connect(self.filter_assists)
 
         grid = QGridLayout()
         for col, title in enumerate(("", "Top line", "Bottom line", "Type", "Direction")):
@@ -286,18 +290,35 @@ class Window(QMainWindow):
         form = QFormLayout()
         form.addRow("Names", self._row(self.amsg_src, msg_browse))
         form.addRow("Definitions", self._row(self.csa_src, csa_browse))
-        form.addRow("Character", self.assist_slot)
+
 
         layout = QVBoxLayout()
         layout.addLayout(form)
+        layout.addWidget(self.assist_filter)
+        layout.addWidget(self.assist_list, 1)
         layout.addLayout(grid)
-        layout.addStretch(1)
         layout.addWidget(self.assist_note)
         layout.addWidget(self.assist_btn)
 
         box = QGroupBox("Assists")
         box.setLayout(layout)
         return box
+
+    def show_assist_slots(self, names, defs):
+        self.assist_list.blockSignals(True)
+        self.assist_list.clear()
+        for i, slot in enumerate(defs.slots):
+            labels = [names.messages[a.name1 - 1] for a in slot
+                      if 0 < a.name1 <= len(names.messages)]
+            self.assist_list.addItem(f"{i:>4}  " + (" / ".join(labels) or "empty"))
+        self.assist_list.blockSignals(False)
+        self.filter_assists()
+
+    def filter_assists(self):
+        needle = self.assist_filter.text().strip().lower()
+        for row in range(self.assist_list.count()):
+            item = self.assist_list.item(row)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
 
     def assist_tables(self):
         msg_path = Path(self.amsg_src.text().strip())
@@ -316,10 +337,11 @@ class Window(QMainWindow):
         names, defs, _m, _c = self.assist_tables()
         if names is None or defs is None:
             return
+        if self.assist_list.count() != len(defs.slots):
+            self.show_assist_slots(names, defs)
         self.assist_btn.setEnabled(True)
 
-        # Character1 is slot 0.
-        index = self.assist_slot.value() - 1
+        index = max(0, self.assist_list.currentRow())
         slot = defs.slots[index] if index < len(defs.slots) else []
         for row, (name1, name2, kind, direction) in enumerate(self.assist_rows):
             assist = slot[row] if row < len(slot) else csa.Assist()
@@ -328,10 +350,7 @@ class Window(QMainWindow):
             kind.setCurrentIndex(max(0, kind.findData(assist.type)))
             direction.setCurrentIndex(max(0, direction.findData(assist.direction)))
 
-        if index < len(defs.slots):
-            self.assist_note.setText(f"Character{index + 1} of {len(defs.slots)}.")
-        else:
-            self.assist_note.setText(f"Character{index + 1} is past the table, will be added.")
+        self.assist_note.setText(f"Slot {index} of {len(defs.slots)}.")
 
     def _pick_file(self, target: QLineEdit, pattern: str):
         chosen, _ = QFileDialog.getOpenFileName(
@@ -394,7 +413,7 @@ class Window(QMainWindow):
                 names.add(bottom) if bottom else 0,
                 kind.currentData(), direction.currentData()))
 
-        index = self.assist_slot.value() - 1
+        index = max(0, self.assist_list.currentRow())
         defs.set_slot(index, assists)
 
         out = Path(self.out_dir.text().strip())
@@ -402,12 +421,17 @@ class Window(QMainWindow):
         (out / "AssistDef_New.csa").write_bytes(defs.build())
         (out / "AssistMsg_New.msd").write_bytes(names.build())
 
+        # Carry on from what was just written, otherwise the next edit reloads
+        # the untouched source and the change appears to vanish.
+        self.csa_src.setText(str(out / "AssistDef_New.csa"))
+        self.amsg_src.setText(str(out / "AssistMsg_New.msd"))
+
         filled = sum(1 for a in assists if a.name1 or a.name2)
+        self.show_assist_slots(names, defs)
+        self.assist_list.setCurrentRow(index)
         self.assist_note.setText(
-            f"Character{index + 1}, {filled} assists. "
-            f"Wrote AssistDef_New.csa and AssistMsg_New.msd")
-        self.console.appendPlainText(
-            f"assists: Character{index + 1}, {filled} entries")
+            f"Slot {index}, {filled} assists. Wrote AssistDef_New.csa and AssistMsg_New.msd")
+        self.console.appendPlainText(f"assists: slot {index}, {filled} entries")
 
     def _row(self, widget, button):
         w = QWidget()

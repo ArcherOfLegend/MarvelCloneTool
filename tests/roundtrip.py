@@ -382,10 +382,38 @@ def main():
                               and d.slots[1][0].name1 == defs.slots[1][0].name1)[1])(
                       csa_mod.parse(raw)))
 
-    if (up / "Bass.ini").is_file():
-        rows = csa_mod.read_ini(up / "Bass.ini")
-        check("character ini parses", len(rows) == 3, str(rows))
-        check("first assist read", rows[0]["Name1"] == "Copy Vision")
+    print("\nCharacters.ini is found in the game root")
+    from mvcclone.clone import character_list, find_characters_ini
+    root_ini = Path(tempfile.mkdtemp())
+    shutil.copyfile(up / "Characters.ini", root_ini / "Characters.ini")
+    check("found in the root",
+          find_characters_ini(root_ini).name == "Characters.ini")
+    listed = character_list(find_characters_ini(root_ini))
+    check("all entries listed", len(listed) == 86, str(len(listed)))
+    check("first entry read", listed[0][:2] == (1, "Rash"), str(listed[0]))
+    check("base character read", listed[0][2] == "VJoe", str(listed[0]))
+    nested = Path(tempfile.mkdtemp())
+    (nested / "nativePCx64").mkdir()
+    shutil.copyfile(up / "Characters.ini", nested / "nativePCx64" / "characters.ini")
+    check("still found under nativePCx64",
+          find_characters_ini(nested).is_file())
+
+    print("\nassists edited directly, no ini in the loop")
+    if (up / "AssistDef.csa").is_file():
+        defs = csa_mod.parse((up / "AssistDef.csa").read_bytes())
+        names = msd_mod.parse((up / "AssistMsg.msd").read_bytes())
+        before = len(defs.slots)
+        defs.set_slot(89, [csa_mod.Assist(names.add("Copy Vision"), 0,
+                                          csa_mod.TYPES["shot"],
+                                          csa_mod.DIRECTIONS["front"])])
+        check("writing a slot leaves the count alone", len(defs.slots) == before)
+        check("the name landed", names.messages[-1] == "Copy Vision")
+        rebuilt = csa_mod.parse(defs.build())
+        check("edited table re-parses", rebuilt is not None)
+        if rebuilt:
+            check("the edit is there", rebuilt.slots[89][0].name1 == len(names.messages))
+            check("other slots untouched",
+                  rebuilt.slots[1][0].name1 == defs.slots[1][0].name1)
 
     print("\nstream tables round trip and take new entries")
     from mvcclone import stqr
