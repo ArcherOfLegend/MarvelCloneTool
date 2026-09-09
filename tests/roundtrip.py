@@ -398,6 +398,107 @@ def main():
     check("still found under nativePCx64",
           find_characters_ini(nested).is_file())
 
+    print("\nassist slots line up with character IDs")
+    if (up / "AssistDef.csa").is_file():
+        from mvcclone.clone import ROSTER
+        table = csa_mod.parse((up / "AssistDef.csa").read_bytes())
+        text = msd_mod.parse((up / "AssistMsg.msd").read_bytes())
+        first = lambda slot: (text.messages[slot[0].name1 - 1]
+                              if 0 < slot[0].name1 <= len(text.messages) else "")
+        for cid, who, move in (("0001", "Ryu", "Shoryuken"),
+                               ("0026", "Spider Man", "Web Ball"),
+                               ("0043", "Sentinel", "Sentinel Force")):
+            check(f"slot {int(cid)} is {who}",
+                  first(table.slots[int(cid)]) == move, first(table.slots[int(cid)]))
+        check("the roster covers the base slots",
+              max(int(c) for c, _ in ROSTER) == 51)
+
+    print("\nBGM streams are named after the CharacterID")
+    if (up / "BGM.stqr").is_file() and (up / "Characters.ini").is_file():
+        from mvcclone import stqr as stqr_mod
+        from mvcclone.clone import character_list as chars
+        music = stqr_mod.parse((up / "BGM.stqr").read_bytes())
+        leaves = {p.split("\\")[-1] for p in music.paths}
+        entries = chars(up / "Characters.ini")
+        playable = [c for c in entries if c[3]]
+        children = [c for c in entries if not c[3]]
+        check("children have no SoundID", len(children) == 14, str(len(children)))
+        with_track = [c for c in playable if c[1] in leaves]
+        check("most playable clones have a track",
+              len(with_track) > len(playable) * 0.8,
+              f"{len(with_track)} of {len(playable)}")
+        check("Rash has one", "Rash" in leaves)
+        check("a child does not", "PsylockF" not in leaves)
+
+    print("\nBGM streams are positional, 109 + the character's place")
+    if (up / "BGM.stqr").is_file() and (up / "Characters.ini").is_file():
+        from mvcclone.clone import bgm_stream_index, bgm_stream_owners
+        music = stqr_mod.parse((up / "BGM.stqr").read_bytes())
+        home2 = Path(tempfile.mkdtemp())
+        shutil.copyfile(up / "Characters.ini", home2 / "Characters.ini")
+        owners = bgm_stream_owners(home2, len(music.paths))
+        check("stream 110 is the first clone", owners.get(110) == "Rash",
+              str(owners.get(110)))
+        check("children are skipped", owners.get(117) == "Cyclop", str(owners.get(117)))
+        check("a lookup agrees", bgm_stream_index(home2, "Cyclop") == 117)
+        check("an unknown character has no stream",
+              bgm_stream_index(home2, "NotHere") == -1)
+        leaves = [p.split("\\")[-1] for p in music.paths]
+        agree = sum(1 for i, cid in owners.items() if leaves[i] == cid)
+        check("most streams are also named after their owner",
+              agree > len(owners) * 0.7, f"{agree} of {len(owners)}")
+
+        # setting a track must not disturb its neighbours
+        edited = stqr_mod.parse((up / "BGM.stqr").read_bytes())
+        before = (edited.paths[116], edited.paths[118])
+        edited.set_path(117, "sound\\bgm\\source\\Test")
+        check("the target changed", edited.paths[117].endswith("Test"))
+        check("neighbours did not",
+              (edited.paths[116], edited.paths[118]) == before)
+        check("length held", len(edited.paths) == len(music.paths))
+        check("it still rebuilds", stqr_mod.parse(edited.build()) is not None)
+
+        # A character past the end of the table must still be settable.
+        from mvcclone.clone import bgm_stream_plan
+        short = stqr_mod.parse((up / "BGM.stqr").read_bytes())
+        short.streams = short.streams[:150]
+        short.events = short.events[:150]
+        short.paths = short.paths[:150]
+        plan = bgm_stream_plan(home2)
+        check("the plan covers characters with no stream",
+              max(i for i, _ in plan) >= len(short.paths), str(max(i for i, _ in plan)))
+        target = max(i for i, _ in plan)
+        gaps = short.set_path(target, "sound\\bgm\\source\\Late")
+        check("gaps counted, target excluded", gaps == target - 150, str(gaps))
+        check("the late track landed", short.paths[target].endswith("Late"))
+        check("the table grew to fit", len(short.paths) == target + 1)
+        check("earlier entries survived",
+              short.paths[149] == stqr_mod.parse(
+                  (up / "BGM.stqr").read_bytes()).paths[149])
+
+    print("\nevery assist slot gets a name")
+    if (up / "Characters.ini").is_file():
+        from mvcclone.clone import assist_slot_names, CLONE_SLOT_BASE
+        home = Path(tempfile.mkdtemp()) / "ULTIMATE MARVEL VS. CAPCOM 3"
+        engine = home / "nativePCx64" / "CloneEngine"
+        engine.mkdir(parents=True)
+        shutil.copyfile(up / "Characters.ini", home / "Characters.ini")
+        shutil.copyfile(up / "AssistDef.csa", engine / "AssistDef.csa")
+        who = assist_slot_names(home, 161)
+        # The install path is often blank, so the tables have to be enough.
+        from_tables = assist_slot_names([engine / "AssistDef.csa", ""], 161)
+        check("found from the table path alone",
+              from_tables.get(60) == "Rash", str(from_tables.get(60)))
+        check("no hints does not crash", find_characters_ini("", None).name
+              == "Characters.ini")
+        check("base roster by ID", who.get(43) == "Sentinel", str(who.get(43)))
+        check("children named", who.get(52) == "ZeroSh", str(who.get(52)))
+        check("last child is slot 59", who.get(59) == "DrStrangeSh", str(who.get(59)))
+        check("Character1 is slot 60", who.get(CLONE_SLOT_BASE + 1) == "Rash",
+              str(who.get(60)))
+        check("Character2 is slot 61", who.get(61) == "KennFist", str(who.get(61)))
+        check("nothing past the table", max(who) < 161)
+
     print("\nassists edited directly, no ini in the loop")
     if (up / "AssistDef.csa").is_file():
         defs = csa_mod.parse((up / "AssistDef.csa").read_bytes())

@@ -118,6 +118,64 @@ ROSTER = [
 ]
 
 
+# Slots 52 to 59 belong to the game's own child characters: afterimages,
+# helpers and summons. They carry no assists of their own and nothing in
+# Characters.ini refers to them.
+CHILDREN = [
+    ("0052", "ZeroSh"),
+    ("0053", "MorriganSh"),
+    ("0054", "FeliciaF"),
+    ("0055", "FeliciaC"),
+    ("0056", "Zombie"),
+    ("0057", "Mayoi"),
+    ("0058", "RedArremerSh"),
+    ("0059", "DrStrangeSh"),
+]
+
+# Clone slots start after them, so Characters.ini [Character1] is slot 60.
+CLONE_SLOT_BASE = 59
+
+# BGM works the same way but on its own numbering. The base game owns streams 0
+# to 109, then the k-th playable entry in Characters.ini takes stream 109 + k.
+# Children are skipped, since they have no music. Verified against a real
+# BGM.stqr: 58 of 72 clone streams are also named after their character, and
+# the position holds for the rest, which reuse another character's track.
+BGM_STREAM_BASE = 109
+
+
+def bgm_stream_plan(hints) -> list[tuple[int, str]]:
+    """(stream index, CharacterID) for every playable character, table or not."""
+    if isinstance(hints, (str, Path)):
+        hints = [hints]
+    playable = [c for c in character_list(find_characters_ini(*hints)) if c[3]]
+    return [(BGM_STREAM_BASE + position, cid)
+            for position, (_index, cid, _base, _sid) in enumerate(playable, start=1)]
+
+
+def bgm_stream_owners(hints, stream_count: int) -> dict[int, str]:
+    """Which character each existing BGM stream belongs to."""
+    return {slot: cid for slot, cid in bgm_stream_plan(hints) if slot < stream_count}
+
+
+def bgm_stream_index(hints, character: str) -> int:
+    """The stream a character's music has to occupy, or -1 if not found."""
+    for slot, cid in bgm_stream_plan(hints):
+        if cid == character:
+            return slot
+    return -1
+
+
+def assist_slot_names(hints, slot_count: int) -> dict[int, str]:
+    """Who owns each assist slot: base roster, then children, then clones."""
+    if isinstance(hints, (str, Path)):
+        hints = [hints]
+    names = {int(cid): label for cid, label in ROSTER}
+    names.update({int(cid): label for cid, label in CHILDREN})
+    for index, cid, _base, _sid in character_list(find_characters_ini(*hints)):
+        names[CLONE_SLOT_BASE + index] = cid
+    return {k: v for k, v in names.items() if k < slot_count}
+
+
 SOUND_ID_LENGTH = 3
 
 SOUND_ID_PATTERN = re.compile(r"[\\/]([a-z0-9]{2,5})_vo_", re.IGNORECASE)
@@ -636,19 +694,38 @@ def next_character_index(ini_path: Path) -> int:
     return max(used) + 1 if used else 1
 
 
-def find_characters_ini(game_dir: Path) -> Path:
-    """Characters.ini lives in the game root, not nativePCx64."""
-    game_dir = Path(game_dir)
-    for candidate in ("Characters.ini", "characters.ini",
-                      "nativePCx64/Characters.ini", "nativePCx64/characters.ini"):
-        path = game_dir / candidate
-        if path.is_file():
-            return path
-    return game_dir / "Characters.ini"
+def find_characters_ini(*hints: Path) -> Path:
+    """
+    Locate Characters.ini from anything that might be near it.
+
+    It sits in the game root, but the tables you edit live in
+    nativePCx64/CloneEngine, so a path to one of those is enough to find it by
+    walking up. Every hint is tried in turn, first as a folder and then as one
+    of its parents.
+    """
+    names = ("Characters.ini", "characters.ini")
+    for hint in hints:
+        if not hint:
+            continue
+        start = Path(hint)
+        start = start if start.is_dir() else start.parent
+        for folder in (start, *start.parents):
+            for name in names:
+                if (folder / name).is_file():
+                    return folder / name
+            for name in names:
+                if (folder / "nativePCx64" / name).is_file():
+                    return folder / "nativePCx64" / name
+    first = Path(hints[0]) if hints and hints[0] else Path(".")
+    return first / "Characters.ini"
 
 
-def character_list(ini_path: Path) -> list[tuple[int, str, str]]:
-    """(block number, CharacterID, BaseCharacter) for every entry."""
+def character_list(ini_path: Path) -> list[tuple[int, str, str, str]]:
+    """
+    (block number, CharacterID, BaseCharacter, SoundID) for every entry.
+
+    A child entry carries only the first two, so an empty SoundID marks one.
+    """
     if not Path(ini_path).is_file():
         return []
     text = Path(ini_path).read_text(errors="replace")
@@ -658,7 +735,8 @@ def character_list(ini_path: Path) -> list[tuple[int, str, str]]:
         fields = dict(re.findall(r"^\s*(\w+)\s*=\s*(.*?)\s*$", body, re.M))
         cid = fields.get("CharacterID", "")
         if cid:
-            out.append((int(index), cid, fields.get("BaseCharacter", "")))
+            out.append((int(index), cid, fields.get("BaseCharacter", ""),
+                        fields.get("SoundID", "")))
     return sorted(out)
 
 

@@ -9,14 +9,17 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QGridLayout, QListWidget, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QGridLayout, QSpinBox, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from . import csa, msd, stqr
 from .arc import read_arc
 from .clone import (
-    ROSTER, CloneSpec, detect_base_name, detect_sound_id, find_sources, install,
-    max_name_length, run,
+    ROSTER, CloneSpec, assist_slot_names, bgm_stream_index, bgm_stream_owners,
+    bgm_stream_plan,
+    character_list, detect_base_name, detect_sound_id, find_characters_ini,
+    find_sources, install, max_name_length, run,
 )
 
 
@@ -43,6 +46,7 @@ class Window(QMainWindow):
         self.resize(1150, 780)
         self.job: Job | None = None
         self.name_limit = 0
+        self.characters_ini = ""
         self.report = None
         self.spec: CloneSpec | None = None
 
@@ -51,6 +55,7 @@ class Window(QMainWindow):
         pick_game = QPushButton("Browse")
         pick_game.clicked.connect(lambda: self._pick_dir(self.game_dir, "Game install"))
         self.game_dir.editingFinished.connect(self.detect_name)
+        self.game_dir.editingFinished.connect(self.refresh_assist_names)
 
         self.out_dir = QLineEdit(str(Path(tempfile.gettempdir()) / "mvcclone_out"))
         pick_out = QPushButton("Browse")
@@ -193,24 +198,32 @@ class Window(QMainWindow):
         browse = QPushButton("Browse")
         browse.clicked.connect(self.pick_bgm)
 
-        self.bgm_list = QListWidget()
+        self.bgm_list = QTreeWidget()
         self.bgm_list.setAlternatingRowColors(True)
+        self.bgm_list.setRootIsDecorated(False)
+        self.bgm_list.setUniformRowHeights(True)
+        self.bgm_list.setHeaderLabels(["#", "Character", "Path"])
+        self.bgm_list.header().setStretchLastSection(True)
+        self.bgm_list.setColumnWidth(0, 52)
+        self.bgm_list.setColumnWidth(1, 130)
 
         self.bgm_filter = QLineEdit()
         self.bgm_filter.setPlaceholderText("Filter")
         self.bgm_filter.textChanged.connect(self.filter_bgm)
 
-        self.bgm_paths = QPlainTextEdit()
-        self.bgm_paths.setPlaceholderText(
-            "One track per line:\nsound\\bgm\\source\\MyTrack")
-        self.bgm_paths.setMaximumHeight(110)
+        # A clone gets its music from a stream named after its CharacterID, so
+        # offer the characters directly rather than making you type the path.
+        self.bgm_char = QComboBox()
+        self.bgm_char.currentIndexChanged.connect(self.select_bgm_character)
+
+        self.bgm_track = QLineEdit()
+        self.bgm_track.setPlaceholderText("sound\\bgm\\source\\MyTrack")
+
+        set_char = QPushButton("Set track")
+        set_char.clicked.connect(self.set_bgm_for_character)
 
         self.bgm_note = QLabel("Pick BGM.stqr.")
         self.bgm_note.setWordWrap(True)
-
-        self.bgm_btn = QPushButton("Write table")
-        self.bgm_btn.clicked.connect(self.write_bgm)
-        self.bgm_btn.setEnabled(False)
 
         form = QFormLayout()
         form.addRow("Table", self._row(self.bgm_src, browse))
@@ -219,26 +232,106 @@ class Window(QMainWindow):
         layout.addLayout(form)
         layout.addWidget(self.bgm_filter)
         layout.addWidget(self.bgm_list, 1)
-        layout.addWidget(QLabel("Add"))
-        layout.addWidget(self.bgm_paths)
+        layout.addWidget(QLabel("Set a character's track"))
+        layout.addWidget(self.bgm_char)
+        layout.addWidget(self._row(self.bgm_track, set_char))
         layout.addWidget(self.bgm_note)
-        layout.addWidget(self.bgm_btn)
 
         box = QGroupBox("BGM")
         box.setLayout(layout)
         return box
 
+    def select_bgm_character(self):
+        """Jump the list to that character's stream and show its current track."""
+        cid = self.bgm_char.currentData()
+        if not cid:
+            return
+        index = bgm_stream_index(self.bgm_hints(), cid)
+        if 0 <= index < self.bgm_list.topLevelItemCount():
+            item = self.bgm_list.topLevelItem(index)
+            self.bgm_list.setCurrentItem(item)
+            self.bgm_list.scrollToItem(item)
+            self.bgm_track.setText(item.text(2))
+
+    def bgm_hints(self):
+        hints = [self.characters_ini, self.bgm_src.text().strip(),
+                 self.csa_src.text().strip(), self.game_dir.text().strip()]
+        hints = [h for h in hints if h]
+        found = find_characters_ini(*hints) if hints else None
+        if found is not None and found.is_file():
+            self.characters_ini = str(found)
+        return hints
+
+    def load_bgm_characters(self, table):
+        # Every playable character, including the ones whose stream does not
+        # exist yet. Those are the whole point of the picker.
+        keep = self.bgm_char.currentData()
+        self.bgm_char.clear()
+        for slot, cid in bgm_stream_plan(self.bgm_hints()):
+            if slot < len(table.paths):
+                leaf = table.paths[slot].split("\\")[-1]
+                self.bgm_char.addItem(f"{cid}  (stream {slot}, {leaf})", cid)
+            else:
+                self.bgm_char.addItem(f"{cid}  (stream {slot}, no track yet)", cid)
+        if keep is not None:
+            self.bgm_char.setCurrentIndex(max(0, self.bgm_char.findData(keep)))
+
+    def set_bgm_for_character(self):
+        """
+        Put a track on the character's own stream.
+
+        The engine goes by position, not by the path, so appending gives the
+        track to whichever character owns the next free index. It has to be
+        written at 109 + the character's place in Characters.ini.
+        """
+        cid = self.bgm_char.currentData()
+        if not cid:
+            return
+        src = Path(self.bgm_src.text().strip())
+        if not src.is_file():
+            self.bgm_note.setText("Pick a table first.")
+            return
+        track = self.bgm_track.text().strip()
+        if not track:
+            self.bgm_note.setText("Give the track a path.")
+            return
+
+        table = stqr.parse(src.read_bytes())
+        index = bgm_stream_index(self.bgm_hints(), cid)
+        if table is None or index < 0:
+            self.bgm_note.setText(f"Could not work out a stream for {cid}.")
+            return
+
+        gaps = table.set_path(index, track)
+        dest = beside(src)
+        dest.write_bytes(table.build())
+
+        self.bgm_src.setText(str(dest))
+        self.show_bgm_entries(table)
+        self.bgm_list.setCurrentItem(self.bgm_list.topLevelItem(index))
+        note = f"{cid} now plays {track} at stream {index}."
+        if gaps:
+            note += (f" {gaps} character(s) before them had no stream and got a "
+                     f"placeholder, so set their tracks too.")
+        self.bgm_note.setText(note + f" Wrote {dest.name} beside the original.")
+
     def show_bgm_entries(self, table):
+        owners = bgm_stream_owners(self.bgm_hints(), len(table.paths))
         self.bgm_list.clear()
         for i, path in enumerate(table.paths):
-            self.bgm_list.addItem(f"{i:>4}  {path}")
+            row = QTreeWidgetItem([str(i), owners.get(i, ""), path])
+            row.setTextAlignment(0, Qt.AlignmentFlag.AlignRight
+                                 | Qt.AlignmentFlag.AlignVCenter)
+            self.bgm_list.addTopLevelItem(row)
         self.filter_bgm()
+        self.load_bgm_characters(table)
 
     def filter_bgm(self):
         needle = self.bgm_filter.text().strip().lower()
-        for row in range(self.bgm_list.count()):
-            item = self.bgm_list.item(row)
-            item.setHidden(bool(needle) and needle not in item.text().lower())
+        for row in range(self.bgm_list.topLevelItemCount()):
+            item = self.bgm_list.topLevelItem(row)
+            hay = " ".join(item.text(c) for c in range(item.columnCount())).lower()
+            item.setHidden(bool(needle) and needle not in hay)
 
     def build_assist_panel(self) -> QWidget:
         self.amsg_src = QLineEdit()
@@ -251,12 +344,18 @@ class Window(QMainWindow):
         csa_browse = QPushButton("Browse")
         csa_browse.clicked.connect(lambda: self._pick_file(self.csa_src, "*.csa"))
 
-        self.assist_list = QListWidget()
+        self.assist_list = QTreeWidget()
         self.assist_list.setAlternatingRowColors(True)
-        self.assist_list.currentRowChanged.connect(self.load_assist_slot)
+        self.assist_list.setRootIsDecorated(False)
+        self.assist_list.setUniformRowHeights(True)
+        self.assist_list.setHeaderLabels(["#", "Character", "Assists"])
+        self.assist_list.header().setStretchLastSection(True)
+        self.assist_list.setColumnWidth(0, 52)
+        self.assist_list.setColumnWidth(1, 130)
+        self.assist_list.currentItemChanged.connect(self.load_assist_slot)
 
         self.assist_filter = QLineEdit()
-        self.assist_filter.setPlaceholderText("Filter by assist name")
+        self.assist_filter.setPlaceholderText("Filter by character or assist")
         self.assist_filter.textChanged.connect(self.filter_assists)
 
         grid = QGridLayout()
@@ -305,20 +404,39 @@ class Window(QMainWindow):
         return box
 
     def show_assist_slots(self, names, defs):
+        # The slot index is the character ID. 0 to 51 is the base roster,
+        # 52 to 59 the game's own children, and Characters.ini [CharacterN]
+        # is slot 59 + N.
+        # The Clone tab's install path may be empty, so fall back to walking up
+        # from the tables themselves. They sit in nativePCx64/CloneEngine.
+        # Remember where it was found. After a write the table paths point at
+        # the output folder, which has no Characters.ini above it.
+        hints = [self.characters_ini, self.csa_src.text().strip(),
+                 self.amsg_src.text().strip(), self.game_dir.text().strip()]
+        found = find_characters_ini(*[h for h in hints if h])
+        if found.is_file():
+            self.characters_ini = str(found)
+        roster = assist_slot_names([found], len(defs.slots))
+
         self.assist_list.blockSignals(True)
         self.assist_list.clear()
         for i, slot in enumerate(defs.slots):
             labels = [names.messages[a.name1 - 1] for a in slot
                       if 0 < a.name1 <= len(names.messages)]
-            self.assist_list.addItem(f"{i:>4}  " + (" / ".join(labels) or "empty"))
+            row = QTreeWidgetItem(
+                [str(i), roster.get(i, ""), " / ".join(labels) or "empty"])
+            row.setTextAlignment(0, Qt.AlignmentFlag.AlignRight
+                                 | Qt.AlignmentFlag.AlignVCenter)
+            self.assist_list.addTopLevelItem(row)
         self.assist_list.blockSignals(False)
         self.filter_assists()
 
     def filter_assists(self):
         needle = self.assist_filter.text().strip().lower()
-        for row in range(self.assist_list.count()):
-            item = self.assist_list.item(row)
-            item.setHidden(bool(needle) and needle not in item.text().lower())
+        for row in range(self.assist_list.topLevelItemCount()):
+            item = self.assist_list.topLevelItem(row)
+            hay = " ".join(item.text(c) for c in range(item.columnCount())).lower()
+            item.setHidden(bool(needle) and needle not in hay)
 
     def assist_tables(self):
         msg_path = Path(self.amsg_src.text().strip())
@@ -333,15 +451,26 @@ class Window(QMainWindow):
             return None, None, None, None
         return names, defs, msg_path, csa_path
 
+    def refresh_assist_names(self):
+        names, defs, _m, _c = self.assist_tables()
+        if names is not None and defs is not None:
+            keep = self.current_assist_slot()
+            self.show_assist_slots(names, defs)
+            self.assist_list.setCurrentItem(self.assist_list.topLevelItem(keep))
+
+    def current_assist_slot(self) -> int:
+        item = self.assist_list.currentItem()
+        return self.assist_list.indexOfTopLevelItem(item) if item else 0
+
     def load_assist_slot(self):
         names, defs, _m, _c = self.assist_tables()
         if names is None or defs is None:
             return
-        if self.assist_list.count() != len(defs.slots):
+        if self.assist_list.topLevelItemCount() != len(defs.slots):
             self.show_assist_slots(names, defs)
         self.assist_btn.setEnabled(True)
 
-        index = max(0, self.assist_list.currentRow())
+        index = self.current_assist_slot()
         slot = defs.slots[index] if index < len(defs.slots) else []
         for row, (name1, name2, kind, direction) in enumerate(self.assist_rows):
             assist = slot[row] if row < len(slot) else csa.Assist()
@@ -370,31 +499,179 @@ class Window(QMainWindow):
         table = stqr.parse(Path(chosen).read_bytes())
         if table is None:
             self.bgm_note.setText("Not a stream table this tool reads.")
-            self.bgm_btn.setEnabled(False)
             return
         self.show_bgm_entries(table)
         self.bgm_note.setText(f"{len(table.paths)} entries.")
-        self.bgm_btn.setEnabled(True)
 
-    def write_bgm(self):
-        src = Path(self.bgm_src.text().strip())
-        entries = [line for line in self.bgm_paths.toPlainText().splitlines()
-                   if line.strip()]
-        if not entries:
-            self.bgm_note.setText("Nothing to add.")
-            return
-        dest = Path(self.out_dir.text().strip()) / f"{src.stem}_New.stqr"
+    def build_assist_panel(self) -> QWidget:
+        self.amsg_src = QLineEdit()
+        self.amsg_src.setPlaceholderText("AssistMsg.msd")
+        msg_browse = QPushButton("Browse")
+        msg_browse.clicked.connect(lambda: self._pick_file(self.amsg_src, "*.msd"))
+
+        self.csa_src = QLineEdit()
+        self.csa_src.setPlaceholderText("AssistDef.csa")
+        csa_browse = QPushButton("Browse")
+        csa_browse.clicked.connect(lambda: self._pick_file(self.csa_src, "*.csa"))
+
+        self.assist_list = QTreeWidget()
+        self.assist_list.setAlternatingRowColors(True)
+        self.assist_list.setRootIsDecorated(False)
+        self.assist_list.setUniformRowHeights(True)
+        self.assist_list.setHeaderLabels(["#", "Character", "Assists"])
+        self.assist_list.header().setStretchLastSection(True)
+        self.assist_list.setColumnWidth(0, 52)
+        self.assist_list.setColumnWidth(1, 130)
+        self.assist_list.currentItemChanged.connect(self.load_assist_slot)
+
+        self.assist_filter = QLineEdit()
+        self.assist_filter.setPlaceholderText("Filter by character or assist")
+        self.assist_filter.textChanged.connect(self.filter_assists)
+
+        grid = QGridLayout()
+        for col, title in enumerate(("", "Top line", "Bottom line", "Type", "Direction")):
+            grid.addWidget(QLabel(title), 0, col)
+
+        self.assist_rows = []
+        for row in range(3):
+            name1, name2 = QLineEdit(), QLineEdit()
+            kind, direction = QComboBox(), QComboBox()
+            for label in csa.TYPES:
+                kind.addItem(label.capitalize(), csa.TYPES[label])
+            for label in csa.DIRECTIONS:
+                direction.addItem(
+                    {"tiltup": "TiltUp", "tiltdw": "TiltDw"}.get(label, label.capitalize()),
+                    csa.DIRECTIONS[label])
+            grid.addWidget(QLabel(f"{row + 1}"), row + 1, 0)
+            grid.addWidget(name1, row + 1, 1)
+            grid.addWidget(name2, row + 1, 2)
+            grid.addWidget(kind, row + 1, 3)
+            grid.addWidget(direction, row + 1, 4)
+            self.assist_rows.append((name1, name2, kind, direction))
+
+        self.assist_note = QLabel("Pick the two tables.")
+        self.assist_note.setWordWrap(True)
+
+        self.assist_btn = QPushButton("Write tables")
+        self.assist_btn.clicked.connect(self.write_assists)
+        self.assist_btn.setEnabled(False)
+
+        form = QFormLayout()
+        form.addRow("Names", self._row(self.amsg_src, msg_browse))
+        form.addRow("Definitions", self._row(self.csa_src, csa_browse))
+
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(self.assist_filter)
+        layout.addWidget(self.assist_list, 1)
+        layout.addLayout(grid)
+        layout.addWidget(self.assist_note)
+        layout.addWidget(self.assist_btn)
+
+        box = QGroupBox("Assists")
+        box.setLayout(layout)
+        return box
+
+    def show_assist_slots(self, names, defs):
+        # The slot index is the character ID. 0 to 51 is the base roster,
+        # 52 to 59 the game's own children, and Characters.ini [CharacterN]
+        # is slot 59 + N.
+        # The Clone tab's install path may be empty, so fall back to walking up
+        # from the tables themselves. They sit in nativePCx64/CloneEngine.
+        # Remember where it was found. After a write the table paths point at
+        # the output folder, which has no Characters.ini above it.
+        hints = [self.characters_ini, self.csa_src.text().strip(),
+                 self.amsg_src.text().strip(), self.game_dir.text().strip()]
+        found = find_characters_ini(*[h for h in hints if h])
+        if found.is_file():
+            self.characters_ini = str(found)
+        roster = assist_slot_names([found], len(defs.slots))
+
+        self.assist_list.blockSignals(True)
+        self.assist_list.clear()
+        for i, slot in enumerate(defs.slots):
+            labels = [names.messages[a.name1 - 1] for a in slot
+                      if 0 < a.name1 <= len(names.messages)]
+            row = QTreeWidgetItem(
+                [str(i), roster.get(i, ""), " / ".join(labels) or "empty"])
+            row.setTextAlignment(0, Qt.AlignmentFlag.AlignRight
+                                 | Qt.AlignmentFlag.AlignVCenter)
+            self.assist_list.addTopLevelItem(row)
+        self.assist_list.blockSignals(False)
+        self.filter_assists()
+
+    def filter_assists(self):
+        needle = self.assist_filter.text().strip().lower()
+        for row in range(self.assist_list.topLevelItemCount()):
+            item = self.assist_list.topLevelItem(row)
+            hay = " ".join(item.text(c) for c in range(item.columnCount())).lower()
+            item.setHidden(bool(needle) and needle not in hay)
+
+    def assist_tables(self):
+        msg_path = Path(self.amsg_src.text().strip())
+        csa_path = Path(self.csa_src.text().strip())
+        if not (msg_path.is_file() and csa_path.is_file()):
+            return None, None, None, None
         try:
-            added, _total = stqr.add_streams(src, entries, dest)
+            names = msd.parse(msg_path.read_bytes())
+            defs = csa.parse(csa_path.read_bytes())
         except Exception as exc:
-            self.bgm_note.setText(str(exc))
+            self.assist_note.setText(str(exc))
+            return None, None, None, None
+        return names, defs, msg_path, csa_path
+
+    def refresh_assist_names(self):
+        names, defs, _m, _c = self.assist_tables()
+        if names is not None and defs is not None:
+            keep = self.current_assist_slot()
+            self.show_assist_slots(names, defs)
+            self.assist_list.setCurrentItem(self.assist_list.topLevelItem(keep))
+
+    def current_assist_slot(self) -> int:
+        item = self.assist_list.currentItem()
+        return self.assist_list.indexOfTopLevelItem(item) if item else 0
+
+    def load_assist_slot(self):
+        names, defs, _m, _c = self.assist_tables()
+        if names is None or defs is None:
             return
-        self.bgm_note.setText(f"Added {added}. Wrote {dest.name}")
-        self.console.appendPlainText(f"{src.name} -> {dest}  (+{added})")
-        written = stqr.parse(dest.read_bytes())
-        if written is not None:
-            self.show_bgm_entries(written)
-            self.bgm_paths.clear()
+        if self.assist_list.topLevelItemCount() != len(defs.slots):
+            self.show_assist_slots(names, defs)
+        self.assist_btn.setEnabled(True)
+
+        index = self.current_assist_slot()
+        slot = defs.slots[index] if index < len(defs.slots) else []
+        for row, (name1, name2, kind, direction) in enumerate(self.assist_rows):
+            assist = slot[row] if row < len(slot) else csa.Assist()
+            name1.setText(names.messages[assist.name1 - 1] if assist.name1 else "")
+            name2.setText(names.messages[assist.name2 - 1] if assist.name2 else "")
+            kind.setCurrentIndex(max(0, kind.findData(assist.type)))
+            direction.setCurrentIndex(max(0, direction.findData(assist.direction)))
+
+        self.assist_note.setText(f"Slot {index} of {len(defs.slots)}.")
+
+    def _pick_file(self, target: QLineEdit, pattern: str):
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Choose a file", target.text() or "",
+            f"{pattern};;All files (*)")
+        if chosen:
+            target.setText(chosen)
+            self.load_assist_slot()
+
+    def pick_bgm(self):
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Choose BGM.stqr", self.bgm_src.text() or "",
+            "Stream tables (*.stqr);;All files (*)")
+        if not chosen:
+            return
+        self.bgm_src.setText(chosen)
+        table = stqr.parse(Path(chosen).read_bytes())
+        if table is None:
+            self.bgm_note.setText("Not a stream table this tool reads.")
+            return
+        self.show_bgm_entries(table)
+        self.bgm_note.setText(f"{len(table.paths)} entries.")
 
     def write_assists(self):
         names, defs, msg_path, csa_path = self.assist_tables()
@@ -413,24 +690,24 @@ class Window(QMainWindow):
                 names.add(bottom) if bottom else 0,
                 kind.currentData(), direction.currentData()))
 
-        index = max(0, self.assist_list.currentRow())
+        index = self.current_assist_slot()
         defs.set_slot(index, assists)
 
-        out = Path(self.out_dir.text().strip())
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "AssistDef_New.csa").write_bytes(defs.build())
-        (out / "AssistMsg_New.msd").write_bytes(names.build())
+        csa_out, msg_out = beside(csa_path), beside(msg_path)
+        csa_out.write_bytes(defs.build())
+        msg_out.write_bytes(names.build())
 
         # Carry on from what was just written, otherwise the next edit reloads
         # the untouched source and the change appears to vanish.
-        self.csa_src.setText(str(out / "AssistDef_New.csa"))
-        self.amsg_src.setText(str(out / "AssistMsg_New.msd"))
+        self.csa_src.setText(str(csa_out))
+        self.amsg_src.setText(str(msg_out))
 
         filled = sum(1 for a in assists if a.name1 or a.name2)
         self.show_assist_slots(names, defs)
-        self.assist_list.setCurrentRow(index)
+        self.assist_list.setCurrentItem(self.assist_list.topLevelItem(index))
         self.assist_note.setText(
-            f"Slot {index}, {filled} assists. Wrote AssistDef_New.csa and AssistMsg_New.msd")
+            f"Slot {index}, {filled} assists. Wrote {csa_out.name} and "
+            f"{msg_out.name} beside the originals.")
         self.console.appendPlainText(f"assists: slot {index}, {filled} entries")
 
     def _row(self, widget, button):
@@ -583,6 +860,7 @@ class Window(QMainWindow):
         # Anything on screen belongs to the previous character.
         self.base_name.clear()
         self.name_limit = 0
+        self.characters_ini = ""
         self.new_name.setMaxLength(32767)
         self.install_btn.setEnabled(False)
         self.report = None
@@ -688,6 +966,14 @@ class Window(QMainWindow):
             lambda log: install(self.spec, self.report, log),
             lambda copied: self.note.setText(f"Installed {len(copied)} files."),
         )
+
+
+def beside(src: Path) -> Path:
+    """<name>_New next to the source, without stacking _New_New on a rewrite."""
+    stem = src.stem
+    while stem.endswith("_New"):
+        stem = stem[:-4]
+    return src.with_name(f"{stem}_New{src.suffix}")
 
 
 def main():
