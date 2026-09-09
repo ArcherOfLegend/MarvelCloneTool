@@ -342,6 +342,89 @@ def main():
     except ValueError:
         check("a taken CharacterID is rejected", True)
 
+    print("\nassist and message tables")
+    from mvcclone import csa as csa_mod, msd as msd_mod
+    up = Path("/mnt/user-data/uploads")
+    if (up / "AssistMsg.msd").is_file():
+        for name in ("AssistMsg.msd", "EndingMsg.msd"):
+            raw = (up / name).read_bytes()
+            table = msd_mod.parse(raw)
+            check(f"{name} parses", table is not None)
+            if table:
+                check(f"{name} rebuilds byte for byte", table.build() == raw)
+        names = msd_mod.parse((up / "AssistMsg.msd").read_bytes())
+        check("text decodes", names.messages[3] == "Shoryuken", names.messages[3])
+        check("text survives a round trip",
+              msd_mod.decode(msd_mod.encode("Copy Vision")) == "Copy Vision")
+
+    if (up / "AssistDef.csa").is_file():
+        raw = (up / "AssistDef.csa").read_bytes()
+        defs = csa_mod.parse(raw)
+        check("AssistDef.csa parses", defs is not None)
+        if defs:
+            check("AssistDef.csa rebuilds byte for byte", defs.build() == raw)
+            check("three assists per slot", all(len(s) == 3 for s in defs.slots))
+            check("Hadoken is a shot", defs.slots[1][1].type == csa_mod.TYPES["shot"])
+            check("Shoryuken tilts up",
+                  defs.slots[1][0].direction == csa_mod.DIRECTIONS["tiltup"])
+            check("Hyakki Gojin tilts down",
+                  defs.slots[3][2].direction == csa_mod.DIRECTIONS["tiltdw"])
+            # Every value the shipped table uses has a name from the readme.
+            used_types = {a.type for s in defs.slots for a in s if a.name1}
+            used_dirs = {a.direction for s in defs.slots for a in s if a.name1}
+            check("every type is named",
+                  used_types <= set(csa_mod.TYPES.values()), str(used_types))
+            check("every direction is named",
+                  used_dirs <= set(csa_mod.DIRECTIONS.values()), str(used_dirs))
+            check("a slot can be written at an index past the end",
+                  (lambda d: (d.set_slot(200, [csa_mod.Assist(1, 0, 2, 4)]),
+                              len(d.slots) == 201
+                              and d.slots[1][0].name1 == defs.slots[1][0].name1)[1])(
+                      csa_mod.parse(raw)))
+
+    if (up / "Bass.ini").is_file():
+        rows = csa_mod.read_ini(up / "Bass.ini")
+        check("character ini parses", len(rows) == 3, str(rows))
+        check("first assist read", rows[0]["Name1"] == "Copy Vision")
+
+    print("\nstream tables round trip and take new entries")
+    from mvcclone import stqr
+    from mvcclone.arc import ext_for_hash
+
+    real_voice = Path("/mnt/user-data/uploads/0033_01.arc")
+    if real_voice.is_file():
+        blob = next(e.data for e in read_arc(real_voice).entries
+                    if ext_for_hash(e.ext_hash) == "stqr")
+        table = stqr.parse(blob)
+        check("real stqr parses", table is not None)
+        if table:
+            check("real stqr rebuilds byte for byte", table.build() == blob)
+            check("streams were read", len(table.streams) > 0)
+
+            work = Path(tempfile.mkdtemp())
+            (work / "in.stqr").write_bytes(blob)
+            added, total = stqr.add_streams(
+                work / "in.stqr",
+                ["sound\\event\\mgl\\source\\a", "sound\\event\\mgl\\source\\b"],
+                work / "out.stqr")
+            check("two entries added", added == 2)
+            after = stqr.parse((work / "out.stqr").read_bytes())
+            check("result re-parses", after is not None)
+            if after:
+                check("stream count grew by two",
+                      len(after.streams) == len(table.streams) + 2)
+                check("original paths survive",
+                      after.paths[:len(table.paths)] == table.paths)
+                check("new paths land at the end",
+                      after.paths[-2:] == ["sound\\event\\mgl\\source\\a",
+                                           "sound\\event\\mgl\\source\\b"])
+                last = after.events[-1]
+                import struct as _s
+                check("the new event points at the new stream",
+                      _s.unpack_from("<I", last, 0x5C)[0] == len(after.streams) - 1)
+
+    check("a non-stqr is refused", stqr.parse(b"NOPE" + bytes(200)) is None)
+
     print("\nthe 255 counterpart of a 99 texture")
     from mvcclone.clone import costume_variants
     ui_cos = [f"{i:02d}" for i in range(4)]

@@ -527,6 +527,9 @@ def costume_variants(leaf: str, base: str, new: str, costumes: list[str],
     if fan_out:
         slots += list(costumes)
     slots.append(original)
+    # The 99 textures have a 255 counterpart. Emitted as literal "255" rather
+    # than padded to the original's width, since it is a slot number in its own
+    # right and not a zero padded variant of 99.
     if also_255 and original == "99":
         slots.append("255")
 
@@ -659,6 +662,13 @@ def build_ini_block(spec: CloneSpec, index: int) -> str:
 
 
 def verify_output(report: CloneReport, log=print) -> list[str]:
+    """
+    Re-read everything written and check no string overran its buffer.
+
+    The limit check up front works off the source archives. This works off what
+    actually landed on disk, so a rename rule that grows a path in a way the
+    estimate missed still gets caught before it reaches the game.
+    """
     problems = []
     for result in report.arcs:
         if not result.dest or not result.dest.is_file():
