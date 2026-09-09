@@ -50,21 +50,17 @@ class Stqr:
         self.paths.append(path)
         return index
  
-    def set_path(self, index: int, path: str,
-                 filler: str = "sound\\bgm\\source\\bgm_cr_000") -> int:
-        """
-        Put a path at a fixed stream index, growing the table if needed.
-
-        The engine maps streams to characters by position, so a track has to
-        land on its own index rather than at the end. Any characters in between
-        get `filler` so the numbering still lines up. Returns how many of those
-        placeholders were needed.
-        """
-        gaps = max(0, index - len(self.streams))
-        while len(self.streams) <= index:
-            self.add(filler)
-        self.paths[index] = path
-        return gaps
+    def set_path(self, index: int, path: str, filler: str = "") -> list[int]:
+        filled = []
+        default = filler or (self.paths[-1] if self.paths else "")
+        while len(self.streams) < index:
+            filled.append(len(self.streams))
+            self.add(default)
+        if index == len(self.streams):
+            self.add(path)
+        else:
+            self.paths[index] = path
+        return filled
 
     def build(self) -> bytes:
         stream_start = HEADER_SIZE

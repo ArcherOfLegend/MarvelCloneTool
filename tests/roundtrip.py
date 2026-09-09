@@ -384,17 +384,24 @@ def main():
 
     print("\nCharacters.ini is found in the game root")
     from mvcclone.clone import character_list, find_characters_ini
+    # Written from scratch rather than copied, so this runs anywhere.
+    sample_ini = ("[Character1]\nCharacterID=Rash\nBaseCharacter=VJoe\n"
+                  "SoundID=vjo\nNumColors=8\n"
+                  "[Character2]\nCharacterID=KennFist\nBaseCharacter=Ryu\n"
+                  "SoundID=fis\nNumColors=7\n"
+                  "[Character3]\nCharacterID=PsylockF\nBaseCharacter=FeliciaF\n")
     root_ini = Path(tempfile.mkdtemp())
-    shutil.copyfile(up / "Characters.ini", root_ini / "Characters.ini")
+    (root_ini / "Characters.ini").write_text(sample_ini)
     check("found in the root",
           find_characters_ini(root_ini).name == "Characters.ini")
     listed = character_list(find_characters_ini(root_ini))
-    check("all entries listed", len(listed) == 86, str(len(listed)))
+    check("all entries listed", len(listed) == 3, str(len(listed)))
     check("first entry read", listed[0][:2] == (1, "Rash"), str(listed[0]))
     check("base character read", listed[0][2] == "VJoe", str(listed[0]))
+    check("a child has no SoundID", listed[2][3] == "", str(listed[2]))
     nested = Path(tempfile.mkdtemp())
     (nested / "nativePCx64").mkdir()
-    shutil.copyfile(up / "Characters.ini", nested / "nativePCx64" / "characters.ini")
+    (nested / "nativePCx64" / "characters.ini").write_text(sample_ini)
     check("still found under nativePCx64",
           find_characters_ini(nested).is_file())
 
@@ -430,9 +437,9 @@ def main():
         check("Rash has one", "Rash" in leaves)
         check("a child does not", "PsylockF" not in leaves)
 
-    print("\nBGM streams are positional, 109 + the character's place")
+    print("\nBGM is bound by the event, not the stream position")
     if (up / "BGM.stqr").is_file() and (up / "Characters.ini").is_file():
-        from mvcclone.clone import bgm_stream_index, bgm_stream_owners
+        from mvcclone.clone import bgm_stream_owners
         music = stqr_mod.parse((up / "BGM.stqr").read_bytes())
         home2 = Path(tempfile.mkdtemp())
         shutil.copyfile(up / "Characters.ini", home2 / "Characters.ini")
@@ -440,23 +447,14 @@ def main():
         check("stream 110 is the first clone", owners.get(110) == "Rash",
               str(owners.get(110)))
         check("children are skipped", owners.get(117) == "Cyclop", str(owners.get(117)))
-        check("a lookup agrees", bgm_stream_index(home2, "Cyclop") == 117)
-        check("an unknown character has no stream",
-              bgm_stream_index(home2, "NotHere") == -1)
+        from mvcclone.clone import bgm_event_index as _ev
+        check("a lookup agrees", _ev(home2, "Cyclop") == 138 + 8, str(_ev(home2, "Cyclop")))
+        check("an unknown character has no event", _ev(home2, "NotHere") == -1)
         leaves = [p.split("\\")[-1] for p in music.paths]
         agree = sum(1 for i, cid in owners.items() if leaves[i] == cid)
         check("most streams are also named after their owner",
               agree > len(owners) * 0.7, f"{agree} of {len(owners)}")
 
-        # setting a track must not disturb its neighbours
-        edited = stqr_mod.parse((up / "BGM.stqr").read_bytes())
-        before = (edited.paths[116], edited.paths[118])
-        edited.set_path(117, "sound\\bgm\\source\\Test")
-        check("the target changed", edited.paths[117].endswith("Test"))
-        check("neighbours did not",
-              (edited.paths[116], edited.paths[118]) == before)
-        check("length held", len(edited.paths) == len(music.paths))
-        check("it still rebuilds", stqr_mod.parse(edited.build()) is not None)
 
         # A character past the end of the table must still be settable.
         from mvcclone.clone import bgm_stream_plan
@@ -468,13 +466,37 @@ def main():
         check("the plan covers characters with no stream",
               max(i for i, _ in plan) >= len(short.paths), str(max(i for i, _ in plan)))
         target = max(i for i, _ in plan)
-        gaps = short.set_path(target, "sound\\bgm\\source\\Late")
-        check("gaps counted, target excluded", gaps == target - 150, str(gaps))
-        check("the late track landed", short.paths[target].endswith("Late"))
-        check("the table grew to fit", len(short.paths) == target + 1)
-        check("earlier entries survived",
-              short.paths[149] == stqr_mod.parse(
-                  (up / "BGM.stqr").read_bytes()).paths[149])
+        # Music is bound by the event, not the stream position, so any
+        # character can be set in any order without touching the others.
+        from mvcclone.clone import bgm_event_index, bgm_event_plan
+        events = bgm_event_plan(home2)
+        check("every character has an event",
+              max(e for e, _ in events) < len(music.events),
+              f"{max(e for e, _ in events)} vs {len(music.events)}")
+        check("no dangling events in the shipped file",
+              not any(len(music.paths) <= music.event_stream(i) != 0xFFFFFFFF
+                      for i in range(len(music.events))))
+
+        work = stqr_mod.parse((up / "BGM.stqr").read_bytes())
+        started = len(work.streams)
+        last = bgm_event_index(home2, events[-1][1])
+        first = bgm_event_index(home2, events[0][1])
+        untouched = work.event_stream(bgm_event_index(home2, events[1][1]))
+
+        work.set_event_track(last, "sound\\bgm\\source\\Last")
+        work.set_event_track(first, "sound\\bgm\\source\\First")
+        check("two streams added, nothing else",
+              len(work.streams) == started + 2, str(len(work.streams)))
+        check("the last character got its track",
+              work.paths[work.event_stream(last)].endswith("Last"))
+        check("the first character got its own",
+              work.paths[work.event_stream(first)].endswith("First"))
+        check("a character in between was not moved",
+              work.event_stream(bgm_event_index(home2, events[1][1])) == untouched)
+        check("an existing path is reused, not duplicated",
+              (lambda n: (work.set_event_track(first, "sound\\bgm\\source\\Last"),
+                          len(work.streams) == n)[1])(len(work.streams)))
+        check("it still rebuilds", stqr_mod.parse(work.build()) is not None)
 
     print("\nevery assist slot gets a name")
     if (up / "Characters.ini").is_file():

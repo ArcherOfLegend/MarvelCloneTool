@@ -302,7 +302,7 @@ class Window(QMainWindow):
             self.bgm_note.setText(f"Could not work out a stream for {cid}.")
             return
 
-        gaps = table.set_path(index, track)
+        filled = table.set_path(index, track)
         dest = beside(src)
         dest.write_bytes(table.build())
 
@@ -310,9 +310,11 @@ class Window(QMainWindow):
         self.show_bgm_entries(table)
         self.bgm_list.setCurrentItem(self.bgm_list.topLevelItem(index))
         note = f"{cid} now plays {track} at stream {index}."
-        if gaps:
-            note += (f" {gaps} character(s) before them had no stream and got a "
-                     f"placeholder, so set their tracks too.")
+        if filled:
+            owners = dict(bgm_stream_plan(self.bgm_hints()))
+            waiting = [owners.get(i, str(i)) for i in filled]
+            note += (f" {', '.join(waiting)} sit before them and had no stream, "
+                     f"so they were given a placeholder track.")
         self.bgm_note.setText(note + f" Wrote {dest.name} beside the original.")
 
     def show_bgm_entries(self, table):
