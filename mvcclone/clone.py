@@ -148,6 +148,14 @@ def bgm_stream_owners(hints, stream_count: int) -> dict[int, str]:
     return {slot: cid for slot, cid in bgm_stream_plan(hints) if slot < stream_count}
 
 
+def bgm_stream_index(hints, character: str) -> int:
+    """The stream a character's music occupies, or -1 if not found."""
+    for slot, cid in bgm_stream_plan(hints):
+        if cid == character:
+            return slot
+    return -1
+
+
 def bgm_event_index(hints, character: str) -> int:
     for slot, cid in bgm_stream_plan(hints):
         if cid == character:
@@ -252,9 +260,16 @@ def find_sources(game_dir: Path, char_id: str, sound_lang: str = "01") -> dict[s
 ENDING_DIR = Path("nativePCx64/ui/ending")
 
 
-def find_ending_arc(game_dir: Path, base_name: str) -> Path | None:
-    for candidate in Path(game_dir).rglob(f"ending_{base_name}.arc"):
-        return candidate
+def find_ending_arc(game_dir: Path, char_id: str, base_name: str = "") -> Path | None:
+    names = []
+    if char_id.isdigit():
+        names.append(f"ending_{int(char_id):02d}.arc")
+    if base_name:
+        names.append(f"ending_{base_name}.arc")
+
+    for name in names:
+        for candidate in Path(game_dir).rglob(name):
+            return candidate
     return None
 
 
@@ -479,17 +494,10 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
     reason = "nothing found"
 
     for suffix, src in sources.items():
-        # The voice archive counts. Its srqr is not a rebuildable bank and has
-        # the tightest padding of anything the character owns, so skipping it
-        # produces a limit the clone then fails to meet.
         arc = read_arc(src)
         term = PASSES[kind_for_suffix(suffix)] or "\\{name}"
         cap = arc.path_len - 1
         for e in arc.entries:
-            # Count every path the rename would touch, not just the ones where
-            # the name is a standalone folder. IronMan_l0 and n_IronMan_BM_HQ
-            # grow too, and a path can contain the name more than once, which
-            # multiplies the growth.
             probe = spec.base_name + "\x01"
             if re.split(r"[\\/]", e.path)[0].lower() == "ui":
                 renamed = rename_components(e.path, spec.base_name, probe,
@@ -670,14 +678,6 @@ def next_character_index(ini_path: Path) -> int:
 
 
 def find_characters_ini(*hints: Path) -> Path:
-    """
-    Locate Characters.ini from anything that might be near it.
-
-    It sits in the game root, but the tables you edit live in
-    nativePCx64/CloneEngine, so a path to one of those is enough to find it by
-    walking up. Every hint is tried in turn, first as a folder and then as one
-    of its parents.
-    """
     names = ("Characters.ini", "characters.ini")
     for hint in hints:
         if not hint:
@@ -696,11 +696,6 @@ def find_characters_ini(*hints: Path) -> Path:
 
 
 def character_list(ini_path: Path) -> list[tuple[int, str, str, str]]:
-    """
-    (block number, CharacterID, BaseCharacter, SoundID) for every entry.
-
-    A child entry carries only the first two, so an empty SoundID marks one.
-    """
     if not Path(ini_path).is_file():
         return []
     text = Path(ini_path).read_text(errors="replace")
@@ -741,13 +736,6 @@ def build_ini_block(spec: CloneSpec, index: int) -> str:
 
 
 def verify_output(report: CloneReport, log=print) -> list[str]:
-    """
-    Re-read everything written and check no string overran its buffer.
-
-    The limit check up front works off the source archives. This works off what
-    actually landed on disk, so a rename rule that grows a path in a way the
-    estimate missed still gets caught before it reaches the game.
-    """
     problems = []
     for result in report.arcs:
         if not result.dest or not result.dest.is_file():
@@ -841,13 +829,14 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
         else:
             report.warnings.append(f"{spec.char_id}_{m}.arc not found, skipped")
 
-    ending = find_ending_arc(spec.game_dir, spec.base_name)
+    ending = find_ending_arc(spec.game_dir, spec.char_id, spec.base_name)
     if ending is not None:
         result = clone_archive(spec, "ending", ending, log)
         report.arcs.append(result)
     else:
         report.warnings.append(
-            f"no ending_{spec.base_name}.arc found, so the clone has no arcade ending")
+            f"no ending archive found for {spec.char_id}, so the clone has no "
+            f"arcade ending")
 
     if spec.include_ui:
         written, warns = copy_ui_elements(spec, log)

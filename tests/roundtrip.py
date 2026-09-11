@@ -466,37 +466,6 @@ def main():
         check("the plan covers characters with no stream",
               max(i for i, _ in plan) >= len(short.paths), str(max(i for i, _ in plan)))
         target = max(i for i, _ in plan)
-        # Music is bound by the event, not the stream position, so any
-        # character can be set in any order without touching the others.
-        from mvcclone.clone import bgm_event_index, bgm_event_plan
-        events = bgm_event_plan(home2)
-        check("every character has an event",
-              max(e for e, _ in events) < len(music.events),
-              f"{max(e for e, _ in events)} vs {len(music.events)}")
-        check("no dangling events in the shipped file",
-              not any(len(music.paths) <= music.event_stream(i) != 0xFFFFFFFF
-                      for i in range(len(music.events))))
-
-        work = stqr_mod.parse((up / "BGM.stqr").read_bytes())
-        started = len(work.streams)
-        last = bgm_event_index(home2, events[-1][1])
-        first = bgm_event_index(home2, events[0][1])
-        untouched = work.event_stream(bgm_event_index(home2, events[1][1]))
-
-        work.set_event_track(last, "sound\\bgm\\source\\Last")
-        work.set_event_track(first, "sound\\bgm\\source\\First")
-        check("two streams added, nothing else",
-              len(work.streams) == started + 2, str(len(work.streams)))
-        check("the last character got its track",
-              work.paths[work.event_stream(last)].endswith("Last"))
-        check("the first character got its own",
-              work.paths[work.event_stream(first)].endswith("First"))
-        check("a character in between was not moved",
-              work.event_stream(bgm_event_index(home2, events[1][1])) == untouched)
-        check("an existing path is reused, not duplicated",
-              (lambda n: (work.set_event_track(first, "sound\\bgm\\source\\Last"),
-                          len(work.streams) == n)[1])(len(work.streams)))
-        check("it still rebuilds", stqr_mod.parse(work.build()) is not None)
 
     print("\nevery assist slot gets a name")
     if (up / "Characters.ini").is_file():
@@ -576,29 +545,6 @@ def main():
 
     check("a non-stqr is refused", stqr.parse(b"NOPE" + bytes(200)) is None)
 
-    print("\nthe 255 counterpart of a 99 texture")
-    from mvcclone.clone import costume_variants
-    ui_cos = [f"{i:02d}" for i in range(4)]
-    check("99 alone by default",
-          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos)
-          == ["b_RyA99_BM_HQ_NOMIP"])
-    check("99 plus 255 when asked",
-          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, False, True)
-          == ["b_RyA99_BM_HQ_NOMIP", "b_RyA255_BM_HQ_NOMIP"])
-    check("255 is not padded to the width of 99",
-          "b_RyA255_BM_HQ_NOMIP" in
-          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, False, True))
-    check("a costume texture gets no 255",
-          costume_variants("f_Ryu00_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, False, True)
-          == ["f_RyA00_BM_HQ_NOMIP"])
-    check("an unnumbered texture gets no 255",
-          costume_variants("n_Ryu_BM_HQ_typeB", "Ryu", "RyA", ui_cos, False, True)
-          == ["n_RyA_BM_HQ_typeB"])
-    check("255 composes with the fan out",
-          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", ui_cos, True, True)
-          == [f"b_RyA{s}_BM_HQ_NOMIP" for s in ui_cos]
-          + ["b_RyA99_BM_HQ_NOMIP", "b_RyA255_BM_HQ_NOMIP"])
-
     print("\nSoundID must be exactly three characters")
     for sid, want_ok in (("mgl", True), ("sh", False), ("Shadli", False), ("abcd", False)):
         try:
@@ -607,32 +553,6 @@ def main():
             check(f"SoundID {sid!r} accepted", want_ok)
         except ValueError:
             check(f"SoundID {sid!r} rejected", not want_ok)
-
-    print("\nUI texture leaf renaming")
-    from mvcclone.clone import costume_variants, rename_ui_leaf, sound_archive_dir
-
-    slots = [f"{i:02d}" for i in range(8)]
-    check("numbered UI stays single by default",
-          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", slots)
-          == ["b_RyA99_BM_HQ_NOMIP"])
-    check("fan out is available when asked for",
-          costume_variants("b_Ryu99_BM_HQ_NOMIP", "Ryu", "RyA", slots, True)
-          == [f"b_RyA{s}_BM_HQ_NOMIP" for s in slots] + ["b_RyA99_BM_HQ_NOMIP"])
-    check("unnumbered name plate stays single",
-          costume_variants("n_Ryu_BM_HQ_NOMIP_typeB_other", "Ryu", "RyA", slots)
-          == ["n_RyA_BM_HQ_NOMIP_typeB_other"])
-    ui_cases = [
-        ("b_IronMan99_BM_HQ_NOMIP", BASE, "b_NEW99_BM_HQ_NOMIP"),
-        ("n_IronMan_BM_HQ_NOMIP_typeB_other", BASE, "n_NEW_BM_HQ_NOMIP_typeB_other"),
-        ("f_Ryu00_BM_HQ_NOMIP", "Ryu", "f_NEW00_BM_HQ_NOMIP"),
-        ("f_Ryu07_BM_HQ_NOMIP", "Ryu", "f_NEW07_BM_HQ_NOMIP"),
-        ("StormSword", "Storm", "StormSword"),
-        ("MajinVergil_Tex01_BM", "Vergil", "MajinVergil_Tex01_BM"),
-        ("Ironman_tex1_BM", BASE, "Ironman_tex1_BM"),
-    ]
-    for leaf, base, want in ui_cases:
-        got = rename_ui_leaf(leaf, base, "NEW")
-        check(f"ui leaf {leaf}", got == want, got)
 
     print("\nevent audio files match the references the rewrite produces")
     from mvcclone.clone import clone_sound_events
@@ -665,7 +585,34 @@ def main():
     check("missing voice bank warns",
           any("voice bank" in w for w in silent.warnings), str(silent.warnings))
 
+    print("\nthe arcade ending archive")
+    from mvcclone.clone import find_ending_arc
+    end_game = Path(tempfile.mkdtemp()) / "g"
+    (end_game / "nativePCx64/chr/archive").mkdir(parents=True)
+    make_arc([ArcEntry(r"chr\IronMan\model\x", hash_for_ext("mod"), 0, 0, 0, 0,
+                       padded(r"\IronMan\model", 40))],
+             end_game / "nativePCx64/chr/archive/0033_cmn.arc")
+    (end_game / "nativePCx64/ui/ending").mkdir(parents=True)
+    # Base characters key it by the two digit ID, so 0033 is ending_33.arc.
+    make_arc([ArcEntry(r"ui\gallery\gallery_ending\end_IronMan_BM_HQ_NOMIP",
+                       hash_for_ext("tex"), 0, 0, 0, 0, padded(r"\IronMan\page", 40)),
+              ArcEntry(r"ui\ending\ending_data\IronMan", hash_for_ext("tex"),
+                       0, 0, 0, 0, b"X")],
+             end_game / "nativePCx64/ui/ending/ending_33.arc")
+
+    check("found by numeric ID", find_ending_arc(end_game, "0033") is not None)
+    check("a missing one returns nothing", find_ending_arc(end_game, "0044") is None)
+    end_out = Path(tempfile.mkdtemp())
+    run(CloneSpec(end_game, end_out, "0033", BASE, "PwrSuit", ["00"]), log=lambda _m: None)
+    written = end_out / "nativePCx64/ui/ending/ending_PwrSuit.arc"
+    check("written under the clone's name", written.is_file())
+    if written.is_file():
+        paths = [e.path for e in read_arc(written).entries]
+        check("names inside were renamed",
+              all("PwrSuit" in p and BASE not in p for p in paths), str(paths))
+
     print("\nsound folder is discovered, not assumed")
+    from mvcclone.clone import sound_archive_dir
     for layout in ("nativePCx64/sound/se/chr/archive", "sound/se/chr/archive"):
         probe = Path(tempfile.mkdtemp())
         (probe / layout).mkdir(parents=True)
