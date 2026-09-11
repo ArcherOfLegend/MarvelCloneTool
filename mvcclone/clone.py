@@ -117,10 +117,6 @@ ROSTER = [
     ("0051", "Galactus"),
 ]
 
-
-# Slots 52 to 59 belong to the game's own child characters: afterimages,
-# helpers and summons. They carry no assists of their own and nothing in
-# Characters.ini refers to them.
 CHILDREN = [
     ("0052", "ZeroSh"),
     ("0053", "MorriganSh"),
@@ -132,15 +128,11 @@ CHILDREN = [
     ("0059", "DrStrangeSh"),
 ]
 
-# Clone slots start after them, so Characters.ini [Character1] is slot 60.
 CLONE_SLOT_BASE = 59
 
-# BGM works the same way but on its own numbering. The base game owns streams 0
-# to 109, then the k-th playable entry in Characters.ini takes stream 109 + k.
-# Children are skipped, since they have no music. Verified against a real
-# BGM.stqr: 58 of 72 clone streams are also named after their character, and
-# the position holds for the rest, which reuse another character's track.
 BGM_STREAM_BASE = 109
+
+BGM_EVENT_BASE = 138
 
 
 def bgm_stream_plan(hints) -> list[tuple[int, str]]:
@@ -153,16 +145,19 @@ def bgm_stream_plan(hints) -> list[tuple[int, str]]:
 
 
 def bgm_stream_owners(hints, stream_count: int) -> dict[int, str]:
-    """Which character each existing BGM stream belongs to."""
     return {slot: cid for slot, cid in bgm_stream_plan(hints) if slot < stream_count}
 
 
-def bgm_stream_index(hints, character: str) -> int:
-    """The stream a character's music has to occupy, or -1 if not found."""
+def bgm_event_index(hints, character: str) -> int:
     for slot, cid in bgm_stream_plan(hints):
         if cid == character:
-            return slot
+            return BGM_EVENT_BASE + (slot - BGM_STREAM_BASE)
     return -1
+
+
+def bgm_event_plan(hints) -> list[tuple[int, str]]:
+    return [(BGM_EVENT_BASE + (slot - BGM_STREAM_BASE), cid)
+            for slot, cid in bgm_stream_plan(hints)]
 
 
 def assist_slot_names(hints, slot_count: int) -> dict[int, str]:
@@ -254,6 +249,15 @@ def find_sources(game_dir: Path, char_id: str, sound_lang: str = "01") -> dict[s
     return found
 
 
+ENDING_DIR = Path("nativePCx64/ui/ending")
+
+
+def find_ending_arc(game_dir: Path, base_name: str) -> Path | None:
+    for candidate in Path(game_dir).rglob(f"ending_{base_name}.arc"):
+        return candidate
+    return None
+
+
 def detect_base_name(arc: Arc) -> str | None:
     counts: dict[str, int] = {}
     for e in arc.entries:
@@ -269,6 +273,8 @@ def detect_base_name(arc: Arc) -> str | None:
 def kind_for_suffix(suffix: str) -> str:
     if suffix in ("cmn", "param", "sound"):
         return suffix
+    if suffix == "ending":
+        return "cmn"
     return "costume"
 
 
@@ -349,7 +355,9 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
                                         underscores=spec.underscore_names)
             renamed = renamed.replace(f"{base_sid}_se", f"{new_sid}_se")
         elif re.split(r"[\\/]", e.path)[0].lower() == "ui":
-            parts = re.split(r"([\\/])", e.path)
+            renamed = rename_components(e.path, spec.base_name, spec.new_name,
+                                        underscores=spec.underscore_names)
+            parts = re.split(r"([\\/])", renamed)
             parts[-1] = rename_ui_leaf(parts[-1], spec.base_name, spec.new_name)
             renamed = "".join(parts)
         else:
@@ -380,7 +388,9 @@ def clone_archive(spec: CloneSpec, suffix: str, src: Path, log=print) -> ArcResu
             content_hits=content_hits, path_renames=path_renames, refused=refused,
         )
 
-    if suffix == "sound":
+    if suffix == "ending":
+        dest = spec.out_dir / ENDING_DIR / f"ending_{spec.new_name}.arc"
+    elif suffix == "sound":
         dest_name = f"{spec.new_name}.arc"
         dest = spec.out_dir / sound_archive_dir(spec.game_dir) / dest_name
     else:
@@ -482,7 +492,9 @@ def max_name_length(spec: CloneSpec, log=print) -> tuple[int, str]:
             # multiplies the growth.
             probe = spec.base_name + "\x01"
             if re.split(r"[\\/]", e.path)[0].lower() == "ui":
-                parts = re.split(r"([\\/])", e.path)
+                renamed = rename_components(e.path, spec.base_name, probe,
+                                            underscores=spec.underscore_names)
+                parts = re.split(r"([\\/])", renamed)
                 parts[-1] = rename_ui_leaf(parts[-1], spec.base_name, probe)
                 renamed = "".join(parts)
             else:
@@ -567,122 +579,85 @@ UI_NAME_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(?=_|\d|$)"
 def rename_ui_leaf(leaf: str, base: str, new: str) -> str:
     return re.sub(UI_NAME_RE_TEMPLATE.format(name=re.escape(base)), new, leaf)
 
-
-UI_SLOT_RE_TEMPLATE = r"(?:(?<=^)|(?<=_)){name}(\d+)(?=_|$)"
-
-
-def costume_variants(leaf: str, base: str, new: str, costumes: list[str],
-                     fan_out: bool = False, also_255: bool = False) -> list[str]:
-    renamed = rename_ui_leaf(leaf, base, new)
-    match = re.search(UI_SLOT_RE_TEMPLATE.format(name=re.escape(base)), leaf)
-    if not match:
-        return [renamed]
-
-    original = match.group(1)
-    width = len(original)
-
-    slots: list[str] = []
-    if fan_out:
-        slots += list(costumes)
-    slots.append(original)
-    # The 99 textures have a 255 counterpart. Emitted as literal "255" rather
-    # than padded to the original's width, since it is a slot number in its own
-    # right and not a zero padded variant of 99.
-    if also_255 and original == "99":
-        slots.append("255")
-
-    out = []
-    for slot in dict.fromkeys(slots):
-        padded_slot = slot if slot == "255" else slot.zfill(width)
-        out.append(re.sub(
-            UI_SLOT_RE_TEMPLATE.format(name=re.escape(new)),
-            new + padded_slot, renamed, count=1))
-    return list(dict.fromkeys(out))
+UI_OUTPUTS = [
+    # (destination folder, leaf template, what {slot} takes)
+    ("nativePCx64/ui/chs/chs_b1p/chs_as_n",
+     "n_{name}{slot}_BM_HQ_NOMIP_typeB_other", "none"),
+    ("nativePCx64/ui/chs/chs_b1p/chs_body",
+     "b_{name}{slot}_BM_HQ_NOMIP", "select"),
+    ("nativePCx64/ui/res/res_stgm/stgm_p",
+     "p_{name}{slot}_BM_HQ_NOMIP_typeB", "costume"),
+    ("nativePCx64/ui/res/res_stgm/stgm_p",
+     "p_{name}{slot}_BM_HQ_NOMIP_typeB_other", "costume"),
+]
 
 
-def find_ui_elements(game_dir: Path, base_name: str) -> list[tuple[str, Path | None, str]]:
+def ui_sources(game_dir: Path) -> dict[str, tuple[Path | None, bytes]]:
+    """Every ui texture the game has, by leaf name, loose files and archives."""
     game_dir = Path(game_dir)
-    found: list[tuple[str, Path | None, str]] = []
-    seen: set[tuple[str, str]] = set()
+    found: dict[str, tuple[Path | None, bytes]] = {}
 
     ui_root = game_dir / "nativePCx64" / "ui"
     if ui_root.is_dir():
-        for f in ui_root.rglob("*.tex"):
-            leaf = f.stem
-            if rename_ui_leaf(leaf, base_name, "?") == leaf:
-                continue
-            rel = f.parent.relative_to(game_dir).as_posix()
-            if (rel, leaf) not in seen:
-                seen.add((rel, leaf))
-                found.append((rel, None, leaf))
+        for f in sorted(ui_root.rglob("*.tex")):
+            found.setdefault(f.stem, (f, b""))
 
-    ui_arcs = sorted(ui_root.rglob("*.arc")) if ui_root.is_dir() else []
-    for pattern in ("mnchs*.arc", "mngame*.arc"):
-        ui_arcs += [p for p in game_dir.rglob(pattern) if p not in ui_arcs]
-
-    if True:
-        for arc_file in sorted(set(ui_arcs)):
-            try:
-                arc = read_arc(arc_file)
-            except ValueError:
-                continue
-            for e in arc.entries:
-                parts = re.split(r"[\\/]", e.path)
-                leaf = parts[-1]
-                if rename_ui_leaf(leaf, base_name, "?") == leaf:
-                    continue
-                rel = "nativePCx64/" + "/".join(parts[:-1])
-                if (rel, leaf) not in seen:
-                    seen.add((rel, leaf))
-                    found.append((rel, arc_file, leaf))
-
+    arcs = sorted(ui_root.rglob("*.arc")) if ui_root.is_dir() else []
+    for pattern in ("mnchs*.arc", "mngame*.arc", "mnmain*.arc"):
+        arcs += [p for p in game_dir.rglob(pattern) if p not in arcs]
+    for arc_file in sorted(set(arcs)):
+        try:
+            arc = read_arc(arc_file)
+        except ValueError:
+            continue
+        for e in arc.entries:
+            leaf = re.split(r"[\\/]", e.path)[-1]
+            found.setdefault(leaf, (None, e.data))
     return found
 
 
 def copy_ui_elements(spec: CloneSpec, log=print) -> tuple[list[Path], list[str]]:
+    """Write the loose textures the readme asks for, and nothing else."""
     written: list[Path] = []
     warnings: list[str] = []
 
-    elements = find_ui_elements(spec.game_dir, spec.base_name)
-    if not elements:
-        warnings.append(
-            "no UI textures found for this character"
-            )
+    library = ui_sources(spec.game_dir)
+    if not library:
+        warnings.append("no ui textures found, so the select screen art needs doing by hand")
         return written, warnings
 
-    by_arc: dict[Path, list[tuple[str, str]]] = {}
-    for rel, arc_file, leaf in elements:
-        if arc_file is None:
-            src = spec.game_dir / rel / f"{leaf}.tex"
-            for new_leaf in costume_variants(
-                    leaf, spec.base_name, spec.new_name, spec.costumes,
-                    spec.fan_out_ui, spec.ui_255):
-                dest = spec.out_dir / rel / f"{new_leaf}.tex"
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src, dest)
-                written.append(dest)
+    for folder, template, kind in UI_OUTPUTS:
+        if kind == "costume":
+            pairs = [(slot, slot) for slot in spec.costumes]
+        elif kind == "select":
+            # The select screen texture is always 99 in the base game. Optional
+            # extras write the same image under other numbers.
+            pairs = [("99", "99")]
+            if spec.fan_out_ui:
+                pairs += [("99", slot) for slot in spec.costumes]
+            if spec.ui_255:
+                pairs.append(("99", "255"))
         else:
-            by_arc.setdefault(arc_file, []).append((rel, leaf))
+            pairs = [("", "")]
 
-    for arc_file, wanted in by_arc.items():
-        arc = read_arc(arc_file)
-        index = {re.split(r"[\\/]", e.path)[-1]: e for e in arc.entries}
-        for rel, leaf in wanted:
-            entry = index.get(leaf)
+        for source_slot, dest_slot in pairs:
+            source_leaf = template.format(name=spec.base_name, slot=source_slot)
+            entry = library.get(source_leaf)
             if entry is None:
-                warnings.append(f"{leaf} vanished from {arc_file.name}")
+                warnings.append(f"{source_leaf}.tex not found")
                 continue
-            for new_leaf in costume_variants(
-                    leaf, spec.base_name, spec.new_name, spec.costumes,
-                    spec.fan_out_ui, spec.ui_255):
-                dest = spec.out_dir / rel / f"{new_leaf}.tex"
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(entry.data)
-                written.append(dest)
+            path, blob = entry
+            data = path.read_bytes() if path is not None else blob
+
+            dest_leaf = template.format(name=spec.new_name, slot=dest_slot)
+            dest = spec.out_dir / folder / f"{dest_leaf}.tex"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            written.append(dest)
 
     log(f"{len(written)} UI textures written")
     for w in written:
-        log(f"   {w.parent.name}/{w.name}")
+        log(f"   {w.relative_to(spec.out_dir).as_posix()}")
     return written, warnings
 
 
@@ -865,6 +840,14 @@ def run(spec: CloneSpec, log=print) -> CloneReport:
                 f"no voice bank at {looked}, so the clone has no sound of its own")
         else:
             report.warnings.append(f"{spec.char_id}_{m}.arc not found, skipped")
+
+    ending = find_ending_arc(spec.game_dir, spec.base_name)
+    if ending is not None:
+        result = clone_archive(spec, "ending", ending, log)
+        report.arcs.append(result)
+    else:
+        report.warnings.append(
+            f"no ending_{spec.base_name}.arc found, so the clone has no arcade ending")
 
     if spec.include_ui:
         written, warns = copy_ui_elements(spec, log)
