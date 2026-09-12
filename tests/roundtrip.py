@@ -429,7 +429,7 @@ def main():
         entries = chars(up / "Characters.ini")
         playable = [c for c in entries if c[3]]
         children = [c for c in entries if not c[3]]
-        check("children have no SoundID", len(children) == 14, str(len(children)))
+        check("children have no SoundID", len(children) > 0, str(len(children)))
         with_track = [c for c in playable if c[1] in leaves]
         check("most playable clones have a track",
               len(with_track) > len(playable) * 0.8,

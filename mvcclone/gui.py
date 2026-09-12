@@ -418,7 +418,9 @@ class Window(QMainWindow):
         found = find_characters_ini(*[h for h in hints if h])
         if found.is_file():
             self.characters_ini = str(found)
-        roster = assist_slot_names([found], len(defs.slots))
+        # Uncapped: characters past the end of the table have to appear too,
+        # and the cap is what was hiding Sagt, Heisn and the rest.
+        roster = assist_slot_names([found], 10 ** 6)
 
         self.assist_list.blockSignals(True)
         self.assist_list.clear()
@@ -430,6 +432,15 @@ class Window(QMainWindow):
             row.setTextAlignment(0, Qt.AlignmentFlag.AlignRight
                                  | Qt.AlignmentFlag.AlignVCenter)
             self.assist_list.addTopLevelItem(row)
+        # Characters whose slot is past the end of the table have no row yet.
+        # Without one they are simply missing from the list.
+        for slot, cid in sorted(roster.items()):
+            if slot >= len(defs.slots):
+                row = QTreeWidgetItem([str(slot), cid, "no slot yet"])
+                row.setTextAlignment(0, Qt.AlignmentFlag.AlignRight
+                                     | Qt.AlignmentFlag.AlignVCenter)
+                self.assist_list.addTopLevelItem(row)
+
         self.assist_list.blockSignals(False)
         self.filter_assists()
 
@@ -458,187 +469,29 @@ class Window(QMainWindow):
         if names is not None and defs is not None:
             keep = self.current_assist_slot()
             self.show_assist_slots(names, defs)
-            self.assist_list.setCurrentItem(self.assist_list.topLevelItem(keep))
+            self.select_assist_slot(keep)
 
-    def current_assist_slot(self) -> int:
-        item = self.assist_list.currentItem()
-        return self.assist_list.indexOfTopLevelItem(item) if item else 0
-
-    def load_assist_slot(self):
-        names, defs, _m, _c = self.assist_tables()
-        if names is None or defs is None:
-            return
-        if self.assist_list.topLevelItemCount() != len(defs.slots):
-            self.show_assist_slots(names, defs)
-        self.assist_btn.setEnabled(True)
-
-        index = self.current_assist_slot()
-        slot = defs.slots[index] if index < len(defs.slots) else []
-        for row, (name1, name2, kind, direction) in enumerate(self.assist_rows):
-            assist = slot[row] if row < len(slot) else csa.Assist()
-            name1.setText(names.messages[assist.name1 - 1] if assist.name1 else "")
-            name2.setText(names.messages[assist.name2 - 1] if assist.name2 else "")
-            kind.setCurrentIndex(max(0, kind.findData(assist.type)))
-            direction.setCurrentIndex(max(0, direction.findData(assist.direction)))
-
-        self.assist_note.setText(f"Slot {index} of {len(defs.slots)}.")
-
-    def _pick_file(self, target: QLineEdit, pattern: str):
-        chosen, _ = QFileDialog.getOpenFileName(
-            self, "Choose a file", target.text() or "",
-            f"{pattern};;All files (*)")
-        if chosen:
-            target.setText(chosen)
-            self.load_assist_slot()
-
-    def pick_bgm(self):
-        chosen, _ = QFileDialog.getOpenFileName(
-            self, "Choose BGM.stqr", self.bgm_src.text() or "",
-            "Stream tables (*.stqr);;All files (*)")
-        if not chosen:
-            return
-        self.bgm_src.setText(chosen)
-        table = stqr.parse(Path(chosen).read_bytes())
-        if table is None:
-            self.bgm_note.setText("Not a stream table this tool reads.")
-            return
-        self.show_bgm_entries(table)
-        self.bgm_note.setText(f"{len(table.paths)} entries.")
-
-    def build_assist_panel(self) -> QWidget:
-        self.amsg_src = QLineEdit()
-        self.amsg_src.setPlaceholderText("AssistMsg.msd")
-        msg_browse = QPushButton("Browse")
-        msg_browse.clicked.connect(lambda: self._pick_file(self.amsg_src, "*.msd"))
-
-        self.csa_src = QLineEdit()
-        self.csa_src.setPlaceholderText("AssistDef.csa")
-        csa_browse = QPushButton("Browse")
-        csa_browse.clicked.connect(lambda: self._pick_file(self.csa_src, "*.csa"))
-
-        self.assist_list = QTreeWidget()
-        self.assist_list.setAlternatingRowColors(True)
-        self.assist_list.setRootIsDecorated(False)
-        self.assist_list.setUniformRowHeights(True)
-        self.assist_list.setHeaderLabels(["#", "Character", "Assists"])
-        self.assist_list.header().setStretchLastSection(True)
-        self.assist_list.setColumnWidth(0, 52)
-        self.assist_list.setColumnWidth(1, 130)
-        self.assist_list.currentItemChanged.connect(self.load_assist_slot)
-
-        self.assist_filter = QLineEdit()
-        self.assist_filter.setPlaceholderText("Filter by character or assist")
-        self.assist_filter.textChanged.connect(self.filter_assists)
-
-        grid = QGridLayout()
-        for col, title in enumerate(("", "Top line", "Bottom line", "Type", "Direction")):
-            grid.addWidget(QLabel(title), 0, col)
-
-        self.assist_rows = []
-        for row in range(3):
-            name1, name2 = QLineEdit(), QLineEdit()
-            kind, direction = QComboBox(), QComboBox()
-            for label in csa.TYPES:
-                kind.addItem(label.capitalize(), csa.TYPES[label])
-            for label in csa.DIRECTIONS:
-                direction.addItem(
-                    {"tiltup": "TiltUp", "tiltdw": "TiltDw"}.get(label, label.capitalize()),
-                    csa.DIRECTIONS[label])
-            grid.addWidget(QLabel(f"{row + 1}"), row + 1, 0)
-            grid.addWidget(name1, row + 1, 1)
-            grid.addWidget(name2, row + 1, 2)
-            grid.addWidget(kind, row + 1, 3)
-            grid.addWidget(direction, row + 1, 4)
-            self.assist_rows.append((name1, name2, kind, direction))
-
-        self.assist_note = QLabel("Pick the two tables.")
-        self.assist_note.setWordWrap(True)
-
-        self.assist_btn = QPushButton("Write tables")
-        self.assist_btn.clicked.connect(self.write_assists)
-        self.assist_btn.setEnabled(False)
-
-        form = QFormLayout()
-        form.addRow("Names", self._row(self.amsg_src, msg_browse))
-        form.addRow("Definitions", self._row(self.csa_src, csa_browse))
-
-
-        layout = QVBoxLayout()
-        layout.addLayout(form)
-        layout.addWidget(self.assist_filter)
-        layout.addWidget(self.assist_list, 1)
-        layout.addLayout(grid)
-        layout.addWidget(self.assist_note)
-        layout.addWidget(self.assist_btn)
-
-        box = QGroupBox("Assists")
-        box.setLayout(layout)
-        return box
-
-    def show_assist_slots(self, names, defs):
-        # The slot index is the character ID. 0 to 51 is the base roster,
-        # 52 to 59 the game's own children, and Characters.ini [CharacterN]
-        # is slot 59 + N.
-        # The Clone tab's install path may be empty, so fall back to walking up
-        # from the tables themselves. They sit in nativePCx64/CloneEngine.
-        # Remember where it was found. After a write the table paths point at
-        # the output folder, which has no Characters.ini above it.
-        hints = [self.characters_ini, self.csa_src.text().strip(),
-                 self.amsg_src.text().strip(), self.game_dir.text().strip()]
-        found = find_characters_ini(*[h for h in hints if h])
-        if found.is_file():
-            self.characters_ini = str(found)
-        roster = assist_slot_names([found], len(defs.slots))
-
-        self.assist_list.blockSignals(True)
-        self.assist_list.clear()
-        for i, slot in enumerate(defs.slots):
-            labels = [names.messages[a.name1 - 1] for a in slot
-                      if 0 < a.name1 <= len(names.messages)]
-            row = QTreeWidgetItem(
-                [str(i), roster.get(i, ""), " / ".join(labels) or "empty"])
-            row.setTextAlignment(0, Qt.AlignmentFlag.AlignRight
-                                 | Qt.AlignmentFlag.AlignVCenter)
-            self.assist_list.addTopLevelItem(row)
-        self.assist_list.blockSignals(False)
-        self.filter_assists()
-
-    def filter_assists(self):
-        needle = self.assist_filter.text().strip().lower()
+    def select_assist_slot(self, slot: int):
         for row in range(self.assist_list.topLevelItemCount()):
             item = self.assist_list.topLevelItem(row)
-            hay = " ".join(item.text(c) for c in range(item.columnCount())).lower()
-            item.setHidden(bool(needle) and needle not in hay)
-
-    def assist_tables(self):
-        msg_path = Path(self.amsg_src.text().strip())
-        csa_path = Path(self.csa_src.text().strip())
-        if not (msg_path.is_file() and csa_path.is_file()):
-            return None, None, None, None
-        try:
-            names = msd.parse(msg_path.read_bytes())
-            defs = csa.parse(csa_path.read_bytes())
-        except Exception as exc:
-            self.assist_note.setText(str(exc))
-            return None, None, None, None
-        return names, defs, msg_path, csa_path
-
-    def refresh_assist_names(self):
-        names, defs, _m, _c = self.assist_tables()
-        if names is not None and defs is not None:
-            keep = self.current_assist_slot()
-            self.show_assist_slots(names, defs)
-            self.assist_list.setCurrentItem(self.assist_list.topLevelItem(keep))
+            if item.text(0) == str(slot):
+                self.assist_list.setCurrentItem(item)
+                return
 
     def current_assist_slot(self) -> int:
+        """The slot number from the row, which may be past the table's end."""
         item = self.assist_list.currentItem()
-        return self.assist_list.indexOfTopLevelItem(item) if item else 0
+        if item is not None and item.text(0).isdigit():
+            return int(item.text(0))
+        return 0
 
     def load_assist_slot(self):
         names, defs, _m, _c = self.assist_tables()
         if names is None or defs is None:
             return
-        if self.assist_list.topLevelItemCount() != len(defs.slots):
+        # The list is longer than the table now, because characters past its
+        # end get a row too, so only build it when it is actually empty.
+        if self.assist_list.topLevelItemCount() == 0:
             self.show_assist_slots(names, defs)
         self.assist_btn.setEnabled(True)
 
@@ -651,7 +504,12 @@ class Window(QMainWindow):
             kind.setCurrentIndex(max(0, kind.findData(assist.type)))
             direction.setCurrentIndex(max(0, direction.findData(assist.direction)))
 
-        self.assist_note.setText(f"Slot {index} of {len(defs.slots)}.")
+        if index < len(defs.slots):
+            self.assist_note.setText(f"Slot {index} of {len(defs.slots)}.")
+        else:
+            self.assist_note.setText(
+                f"Slot {index}, past the table's {len(defs.slots)}. "
+                f"Writing extends it.")
 
     def _pick_file(self, target: QLineEdit, pattern: str):
         chosen, _ = QFileDialog.getOpenFileName(
@@ -706,7 +564,7 @@ class Window(QMainWindow):
 
         filled = sum(1 for a in assists if a.name1 or a.name2)
         self.show_assist_slots(names, defs)
-        self.assist_list.setCurrentItem(self.assist_list.topLevelItem(index))
+        self.select_assist_slot(index)
         self.assist_note.setText(
             f"Slot {index}, {filled} assists. Wrote {csa_out.name} and "
             f"{msg_out.name} beside the originals.")

@@ -701,7 +701,7 @@ def character_list(ini_path: Path) -> list[tuple[int, str, str, str]]:
     text = Path(ini_path).read_text(errors="replace")
     out = []
     for index, body in re.findall(
-            r"\[Character(\d+)\](.*?)(?=\[Character\d+\]|\Z)", text, re.S):
+            r"\[Character(\d+)\](.*?)(?=^\s*\[|\Z)", text, re.S | re.M):
         fields = dict(re.findall(r"^\s*(\w+)\s*=\s*(.*?)\s*$", body, re.M))
         cid = fields.get("CharacterID", "")
         if cid:
@@ -717,7 +717,7 @@ def existing_character_ids(ini_path: Path) -> dict[str, int]:
     text = ini_path.read_text(errors="replace")
     found = {}
     for index, body in re.findall(
-            r"\[Character(\d+)\](.*?)(?=\[Character\d+\]|\Z)", text, re.S):
+            r"\[Character(\d+)\](.*?)(?=^\s*\[|\Z)", text, re.S | re.M):
         m = re.search(r"^\s*CharacterID\s*=\s*(.*?)\s*$", body, re.M)
         if m and m.group(1):
             found[m.group(1)] = int(index)
